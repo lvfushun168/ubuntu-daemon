@@ -104,6 +104,10 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 		})
 		return
 	}
+	if payload.Metadata == nil {
+		payload.Metadata = map[string]interface{}{}
+	}
+	payload.Metadata["cloud_msg_id"] = envelope.MsgID
 	replies, err := r.gatewayAdapter.Chat(ctx, payload)
 	if err != nil {
 		r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{

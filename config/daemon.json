@@ -12,6 +12,7 @@
     "work_dir": "/root/.openclaw",
     "env_file": "/root/.openclaw/.env",
     "json_config_file": "/root/.openclaw/openclaw.json",
+    "gateway_ws_url": "ws://127.0.0.1:18789",
     "gateway_health_url": "http://127.0.0.1:18789/__openclaw__/canvas/",
     "gateway_token_env_key": "OPENCLAW_GATEWAY_TOKEN",
     "restart_command": "pm2",

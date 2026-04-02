@@ -22,7 +22,7 @@ func New(cfg *config.Config, logger *log.Logger) (*App, error) {
 	execRunner := runner.NewExecRunner()
 	configManager := manager.NewConfigManager(cfg, stateStore, execRunner)
 	remoteRunner := runner.NewRemoteCommandRunner(cfg.RemoteCommand, execRunner)
-	gatewayAdapter := gateway.NewAdapter()
+	gatewayAdapter := gateway.NewAdapter(cfg, logger)
 
 	messageRouter := router.New(logger, nil, configManager, remoteRunner, gatewayAdapter, cfg.DaemonVersion)
 	cloudClient := cloud.NewClient(cfg, logger, messageRouter)

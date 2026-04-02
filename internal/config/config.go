@@ -38,6 +38,7 @@ type OpenClawConfig struct {
 	WorkDir               string   `json:"work_dir"`
 	EnvFile               string   `json:"env_file"`
 	JSONConfigFile        string   `json:"json_config_file"`
+	GatewayWSURL          string   `json:"gateway_ws_url"`
 	GatewayHealthURL      string   `json:"gateway_health_url"`
 	GatewayTokenEnvKey    string   `json:"gateway_token_env_key"`
 	RestartCommand        string   `json:"restart_command"`
@@ -98,6 +99,7 @@ func defaultConfig() *Config {
 			WorkDir:               "/root/.openclaw",
 			EnvFile:               "/root/.openclaw/.env",
 			JSONConfigFile:        "/root/.openclaw/openclaw.json",
+			GatewayWSURL:          "ws://127.0.0.1:18789",
 			GatewayHealthURL:      "http://127.0.0.1:18789/__openclaw__/canvas/",
 			GatewayTokenEnvKey:    "OPENCLAW_GATEWAY_TOKEN",
 			RestartCommand:        "pm2",
