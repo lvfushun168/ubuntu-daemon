@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ type gatewayChallenge struct {
 	Event   string `json:"event"`
 	Payload struct {
 		Nonce string `json:"nonce"`
+		TS    int64  `json:"ts"`
 	} `json:"payload"`
 }
 
@@ -154,20 +156,25 @@ func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, t
 		ID:     connectID,
 		Method: "connect",
 		Params: map[string]interface{}{
+			"minProtocol": 3,
+			"maxProtocol": 3,
+			"client": map[string]interface{}{
+				"id":          "cli",
+				"displayName": "openclaw-daemon",
+				"version":     a.cfg.DaemonVersion,
+				"platform":    runtime.GOOS,
+				"mode":        "cli",
+			},
+			"role":        "operator",
+			"scopes":      []string{"operator.read", "operator.write"},
+			"caps":        []string{},
+			"commands":    []string{},
+			"permissions": map[string]interface{}{},
 			"auth": map[string]interface{}{
 				"token": token,
 			},
-			"device": map[string]interface{}{
-				"id":       a.cfg.DeviceID,
-				"name":     "openclaw-daemon",
-				"platform": "linux",
-				"role":     "service",
-			},
-			"client": map[string]interface{}{
-				"name":    "openclaw-daemon",
-				"version": a.cfg.DaemonVersion,
-			},
-			"nonce": challenge.Payload.Nonce,
+			"locale":    "zh-CN",
+			"userAgent": fmt.Sprintf("openclaw-daemon/%s", a.cfg.DaemonVersion),
 		},
 	}
 	if err := a.writeJSON(ctx, conn, connectReq); err != nil {
@@ -207,14 +214,7 @@ func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload pr
 	params := map[string]interface{}{
 		"sessionKey":     payload.SessionID,
 		"idempotencyKey": cloudMsgID,
-		"message": map[string]interface{}{
-			"role": payload.Role,
-			"text": payload.Text,
-		},
-		"stream": payload.Stream,
-	}
-	if payload.UserID != "" {
-		params["userId"] = payload.UserID
+		"text":           payload.Text,
 	}
 	if len(payload.Metadata) > 0 {
 		params["metadata"] = payload.Metadata

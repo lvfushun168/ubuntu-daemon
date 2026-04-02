@@ -48,13 +48,16 @@ func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
 			t.Fatalf("unexpected connect method: %#v", connectReq)
 		}
 		connectParams := connectReq["params"].(map[string]interface{})
+		if connectParams["minProtocol"] != float64(3) || connectParams["maxProtocol"] != float64(3) {
+			t.Fatalf("unexpected protocol params: %#v", connectParams)
+		}
 		auth := connectParams["auth"].(map[string]interface{})
 		if auth["token"] != "token-1" {
 			t.Fatalf("unexpected connect token: %#v", auth)
 		}
-		device := connectParams["device"].(map[string]interface{})
-		if device["id"] != "device-1" {
-			t.Fatalf("unexpected device params: %#v", device)
+		client := connectParams["client"].(map[string]interface{})
+		if client["id"] != "cli" || client["mode"] != "cli" {
+			t.Fatalf("unexpected client params: %#v", client)
 		}
 		if err := conn.WriteJSON(map[string]interface{}{
 			"type":    "res",
@@ -79,9 +82,8 @@ func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
 		if chatParams["idempotencyKey"] != "msg-1" {
 			t.Fatalf("unexpected idempotency key: %#v", chatParams)
 		}
-		message := chatParams["message"].(map[string]interface{})
-		if message["text"] != "hello" {
-			t.Fatalf("unexpected message payload: %#v", message)
+		if chatParams["text"] != "hello" {
+			t.Fatalf("unexpected chat params: %#v", chatParams)
 		}
 		if err := conn.WriteJSON(map[string]interface{}{
 			"type": "res",
