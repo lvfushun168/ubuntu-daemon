@@ -89,3 +89,27 @@ Linux ARM64:
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o build/openclaw-daemon-linux-arm64 ./cmd/openclaw-daemon
 ```
+
+## systemd 部署
+
+当前仓库已提供一个可直接落地的 `systemd` 单元文件：
+
+* [openclaw-daemon.service](/Users/lvfushun/IdeaProjects/openclaw/dameon/deploy/openclaw-daemon.service)
+
+默认约定：
+
+* 二进制路径：`/usr/local/bin/openclaw-daemon`
+* 配置路径：`/etc/openclaw/daemon.json`
+* 工作目录：`/root/.openclaw`
+* 日志文件：`/var/log/openclaw-daemon.log`
+
+典型安装步骤：
+
+```bash
+sudo install -m 0755 /path/to/openclaw-daemon /usr/local/bin/openclaw-daemon
+sudo install -d -m 0755 /etc/openclaw
+sudo install -m 0644 /path/to/daemon.json /etc/openclaw/daemon.json
+sudo install -m 0644 /path/to/openclaw-daemon.service /etc/systemd/system/openclaw-daemon.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now openclaw-daemon
+```

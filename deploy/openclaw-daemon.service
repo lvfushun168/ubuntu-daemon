@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenClaw Ubuntu Daemon
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/.openclaw
+Environment=OPENCLAW_DAEMON_CONFIG=/etc/openclaw/daemon.json
+ExecStart=/usr/local/bin/openclaw-daemon
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/openclaw-daemon.log
+StandardError=append:/var/log/openclaw-daemon.log
+
+[Install]
+WantedBy=multi-user.target
