@@ -20,12 +20,31 @@
 * 配置版本幂等、本地状态文件、原子写入
 * 远程命令白名单、超时和输出截断
 * 云端网关地址的默认值、环境变量覆盖和 `sys_config` 持久化更新
+* OpenClaw Gateway `v3` 握手形态的最小适配骨架
+* `systemd` 单元文件与实机开机自启安装验证
 
 待补充：
 
-* `chat_msg -> OpenClaw Gateway Protocol` 的正式适配
+* `chat_msg -> OpenClaw Gateway Protocol` 的最终回流验证与更完整事件映射
 * 更完整的 `pm2`/`systemd` 运行监督与 crash restart 协调
 * 针对官方 `auth-profiles.json` 的 provider 凭证落地
+
+## 当前联调基线
+
+截至 `2026-04-02`，已确认的联调环境如下：
+
+* 云端 `edge-gateway`：
+  * Netty WS：`ws://43.156.161.7:18080/ws/device`
+  * Mock HTTP：`http://43.156.161.7:6324/api/mock/*`
+  * 说明：`6324` 来自 [deploy.sh](/Users/lvfushun/IdeaProjects/openclaw/edge-gateway/deploy.sh) 的宿主机端口映射，不是 Spring Boot 容器内的 `8080`
+* Ubuntu Daemon：
+  * systemd 服务名：`openclaw-daemon`
+  * 二进制：`/usr/local/bin/openclaw-daemon`
+  * 配置：`/etc/openclaw/daemon.json`
+* OpenClaw Gateway：
+  * `pm2` 进程名：`openclaw`
+  * loopback 监听：`127.0.0.1:18789`
+  * 工作目录：`/root/.openclaw`
 
 ## 本地启动
 
