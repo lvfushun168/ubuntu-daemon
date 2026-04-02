@@ -35,6 +35,8 @@
 cp config/daemon.example.json config/daemon.json
 ```
 
+`daemon.json` 不会自动生成；当前默认约定是放在工程内的 [daemon.json](/Users/lvfushun/IdeaProjects/openclaw/dameon/config/daemon.json)。量产打包时一般就是以 [daemon.example.json](/Users/lvfushun/IdeaProjects/openclaw/dameon/config/daemon.example.json) 为模板生成你自己的 `config/daemon.json`。
+
 2. 启动：
 
 ```bash
@@ -46,6 +48,14 @@ go run ./cmd/openclaw-daemon
 ```bash
 OPENCLAW_DAEMON_CONFIG=/path/to/daemon.json go run ./cmd/openclaw-daemon
 ```
+
+`device_id` 现在支持三种来源，优先级从高到低如下：
+
+1. `OPENCLAW_DEVICE_ID` 环境变量
+2. `daemon.json` 里的 `device_id`
+3. 自动探测首个非 loopback 网卡的 MAC 地址
+
+如果你准备把设备出厂时按 MAC 注册到后端，那最省事的方式就是直接把 `device_id` 留空，让 daemon 在 Ubuntu 上自动取 MAC。
 
 云端网关地址支持环境变量覆盖，适用于 `root` 或其他运行用户：
 

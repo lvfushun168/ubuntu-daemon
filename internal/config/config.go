@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,6 +76,7 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.path = path
 	cfg.applyEnvOverrides()
+	cfg.applyDeviceIDFallback()
 	if err := cfg.normalize(path); err != nil {
 		return nil, err
 	}
@@ -182,6 +184,10 @@ func (c *Config) UpdateCloudWSURL(wsURL string) error {
 }
 
 func (c *Config) applyEnvOverrides() {
+	if value := strings.TrimSpace(os.Getenv("OPENCLAW_DEVICE_ID")); value != "" {
+		c.DeviceID = value
+	}
+
 	if value := strings.TrimSpace(os.Getenv("OPENCLAW_CLOUD_WS_URL")); value != "" {
 		c.Cloud.WSURL = value
 		return
@@ -211,6 +217,44 @@ func (c *Config) applyEnvOverrides() {
 		wsPath = "/" + wsPath
 	}
 	c.Cloud.WSURL = fmt.Sprintf("%s://%s:%s%s", scheme, host, port, wsPath)
+}
+
+func (c *Config) applyDeviceIDFallback() {
+	if strings.TrimSpace(c.DeviceID) != "" {
+		return
+	}
+	if mac := detectPrimaryMAC(); mac != "" {
+		c.DeviceID = mac
+	}
+}
+
+func detectPrimaryMAC() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		if len(iface.HardwareAddr) == 0 {
+			continue
+		}
+		return strings.ToLower(iface.HardwareAddr.String())
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if len(iface.HardwareAddr) == 0 {
+			continue
+		}
+		return strings.ToLower(iface.HardwareAddr.String())
+	}
+	return ""
 }
 
 func (c *Config) persist() error {

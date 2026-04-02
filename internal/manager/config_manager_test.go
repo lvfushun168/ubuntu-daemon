@@ -123,3 +123,25 @@ func TestApplyUpdatesCloudWSURLWithoutWritingToEnv(t *testing.T) {
 		t.Fatalf("daemon-only cloud url should not be written to .env: %s", string(envData))
 	}
 }
+
+func TestLoadUsesDeviceIDFromEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "daemon.json")
+	configContent := "{\n" +
+		"  \"device_id\": \"\",\n" +
+		"  \"daemon_version\": \"0.1.0\",\n" +
+		"  \"cloud\": {\"ws_url\": \"ws://43.156.161.7:18080/ws/device\"}\n" +
+		"}\n"
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write daemon config: %v", err)
+	}
+
+	t.Setenv("OPENCLAW_DEVICE_ID", "aa:bb:cc:dd:ee:ff")
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.DeviceID != "aa:bb:cc:dd:ee:ff" {
+		t.Fatalf("unexpected device_id: %s", cfg.DeviceID)
+	}
+}
