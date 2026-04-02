@@ -1,0 +1,32 @@
+{
+  "device_id": "ubuntu-mac-xx-xx-xx",
+  "daemon_version": "0.1.0",
+  "cloud": {
+    "ws_url": "ws://43.156.161.7:18080/ws/device",
+    "connect_timeout_sec": 10,
+    "ping_interval_sec": 30,
+    "reconnect_min_sec": 1,
+    "reconnect_max_sec": 30
+  },
+  "openclaw": {
+    "work_dir": "/root/.openclaw",
+    "env_file": "/root/.openclaw/.env",
+    "json_config_file": "/root/.openclaw/openclaw.json",
+    "gateway_health_url": "http://127.0.0.1:18789/__openclaw__/canvas/",
+    "gateway_token_env_key": "OPENCLAW_GATEWAY_TOKEN",
+    "restart_command": "pm2",
+    "restart_args": ["restart", "openclaw"],
+    "restart_timeout_sec": 20,
+    "health_check_timeout_sec": 5
+  },
+  "remote_command": {
+    "default_timeout_sec": 30,
+    "max_timeout_sec": 300,
+    "max_output_bytes": 65536,
+    "whitelist": ["pm2", "bash", "systemctl", "journalctl"]
+  },
+  "store": {
+    "state_file": "/root/.openclaw/daemon-state.json"
+  },
+  "chat_reply_on_unsupported": true
+}
