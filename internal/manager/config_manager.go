@@ -88,8 +88,20 @@ func (m *ConfigManager) Apply(ctx context.Context, payload protocol.SysConfigPay
 }
 
 func (m *ConfigManager) writeEnv(openClawCfg config.OpenClawConfig, values map[string]string) error {
-	keys := make([]string, 0, len(values))
-	for key := range values {
+	effective := make(map[string]string, len(values)+1)
+	for key, value := range values {
+		effective[key] = value
+	}
+	// 兼容现有 OpenClaw 配置模板：若未显式下发 VORTEX_OPENAI_API_KEY，则用 API_KEY 兜底。
+	// 这样可以避免每次 sys_config 覆盖 .env 后触发网关启动失败。
+	if _, ok := effective["VORTEX_OPENAI_API_KEY"]; !ok {
+		if apiKey, has := effective["API_KEY"]; has && apiKey != "" {
+			effective["VORTEX_OPENAI_API_KEY"] = apiKey
+		}
+	}
+
+	keys := make([]string, 0, len(effective))
+	for key := range effective {
 		if isDaemonOnlyConfigKey(key) {
 			continue
 		}
@@ -99,7 +111,7 @@ func (m *ConfigManager) writeEnv(openClawCfg config.OpenClawConfig, values map[s
 
 	lines := make([]string, 0, len(keys))
 	for _, key := range keys {
-		lines = append(lines, fmt.Sprintf("%s=%s", key, shellEscape(values[key])))
+		lines = append(lines, fmt.Sprintf("%s=%s", key, shellEscape(effective[key])))
 	}
 	content := strings.Join(lines, "\n")
 	if content != "" {
@@ -132,10 +144,15 @@ func (m *ConfigManager) ensureJSONConfig(openClawCfg config.OpenClawConfig, valu
 		auth["token"] = "${" + envKey + "}"
 	}
 	current["gateway"] = gateway
+	delete(current, "default_model")
 
-	// TODO: 未来如果确认官方 provider / auth profile 的最终落点，再补写 agent auth-profiles.json。
+	// OpenClaw 2026.4.1 已不支持根级 default_model，默认模型需写入 agents.defaults.model.primary。
+	// 这里保持与现有配置结构兼容，避免写入未知字段导致 OpenClaw 启动失败。
 	if provider, ok := values["LLM_MODEL"]; ok && provider != "" {
-		current["default_model"] = provider
+		agents := ensureMap(current, "agents")
+		defaults := ensureMap(agents, "defaults")
+		model := ensureMap(defaults, "model")
+		model["primary"] = provider
 	}
 
 	data, err := json.MarshalIndent(current, "", "  ")
