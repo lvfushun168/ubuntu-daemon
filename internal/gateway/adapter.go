@@ -2,7 +2,13 @@ package gateway
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -17,6 +23,7 @@ import (
 
 	"openclaw/dameon/internal/config"
 	"openclaw/dameon/internal/protocol"
+	"openclaw/dameon/internal/store"
 )
 
 const (
@@ -26,9 +33,10 @@ const (
 )
 
 type Adapter struct {
-	cfg    *config.Config
-	logger *log.Logger
-	dialer *websocket.Dialer
+	cfg        *config.Config
+	logger     *log.Logger
+	dialer     *websocket.Dialer
+	stateStore *store.FileStore
 }
 
 type gatewayChallenge struct {
@@ -68,11 +76,29 @@ type gatewayError struct {
 	Message string `json:"message,omitempty"`
 }
 
-func NewAdapter(cfg *config.Config, logger *log.Logger) *Adapter {
+type helloOKFrame struct {
+	Type string `json:"type"`
+	Auth *struct {
+		DeviceToken string   `json:"deviceToken"`
+		Role        string   `json:"role"`
+		Scopes      []string `json:"scopes"`
+		IssuedAtMs  int64    `json:"issuedAtMs"`
+	} `json:"auth,omitempty"`
+}
+
+type connectAuth struct {
+	headerToken    string
+	connectToken   string
+	connectAuthKey string
+	signatureToken string
+}
+
+func NewAdapter(cfg *config.Config, logger *log.Logger, stateStore *store.FileStore) *Adapter {
 	return &Adapter{
-		cfg:    cfg,
-		logger: logger,
-		dialer: &websocket.Dialer{HandshakeTimeout: 10 * time.Second},
+		cfg:        cfg,
+		logger:     logger,
+		dialer:     &websocket.Dialer{HandshakeTimeout: 10 * time.Second},
+		stateStore: stateStore,
 	}
 }
 
@@ -117,26 +143,32 @@ func (a *Adapter) connect(ctx context.Context) (*websocket.Conn, error) {
 		wsURL = defaultGatewayWSURL
 	}
 
-	token, err := a.loadGatewayToken()
+	authState, err := a.resolveConnectAuth()
+	if err != nil {
+		return nil, err
+	}
+	identity, err := a.loadOrCreateGatewayIdentity()
 	if err != nil {
 		return nil, err
 	}
 
 	header := http.Header{}
-	header.Set("Authorization", "Bearer "+token)
+	if authState.headerToken != "" {
+		header.Set("Authorization", "Bearer "+authState.headerToken)
+	}
 	conn, _, err := a.dialer.DialContext(ctx, wsURL, header)
 	if err != nil {
 		return nil, fmt.Errorf("dial openclaw gateway: %w", err)
 	}
 
-	if err := a.completeHandshake(ctx, conn, token); err != nil {
+	if err := a.completeHandshake(ctx, conn, authState, identity); err != nil {
 		conn.Close()
 		return nil, err
 	}
 	return conn, nil
 }
 
-func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, token string) error {
+func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, authState connectAuth, identity *store.DeviceIdentity) error {
 	challengeRaw, err := a.readJSON(ctx, conn)
 	if err != nil {
 		return fmt.Errorf("read connect.challenge: %w", err)
@@ -150,6 +182,24 @@ func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, t
 		return fmt.Errorf("unexpected gateway handshake frame type=%s event=%s", challenge.Type, challenge.Event)
 	}
 
+	signedAtMs := time.Now().UnixMilli()
+	devicePayload := buildDeviceAuthPayloadV3(deviceAuthPayloadParams{
+		deviceID:     identity.DeviceID,
+		clientID:     "cli",
+		clientMode:   "cli",
+		role:         "operator",
+		scopes:       []string{"operator.read", "operator.write"},
+		signedAtMs:   signedAtMs,
+		token:        authState.signatureToken,
+		nonce:        challenge.Payload.Nonce,
+		platform:     runtime.GOOS,
+		deviceFamily: "headless",
+	})
+	signature, err := signDevicePayload(identity.PrivateKeyPEM, devicePayload)
+	if err != nil {
+		return fmt.Errorf("sign device payload: %w", err)
+	}
+
 	connectID := fmt.Sprintf("connect-%d", time.Now().UnixMilli())
 	connectReq := gatewayRequest{
 		Type:   "req",
@@ -159,11 +209,12 @@ func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, t
 			"minProtocol": 3,
 			"maxProtocol": 3,
 			"client": map[string]interface{}{
-				"id":          "cli",
-				"displayName": "openclaw-daemon",
-				"version":     a.cfg.DaemonVersion,
-				"platform":    runtime.GOOS,
-				"mode":        "cli",
+				"id":           "cli",
+				"displayName":  "openclaw-daemon",
+				"version":      a.cfg.DaemonVersion,
+				"platform":     runtime.GOOS,
+				"deviceFamily": "headless",
+				"mode":         "cli",
 			},
 			"role":        "operator",
 			"scopes":      []string{"operator.read", "operator.write"},
@@ -171,7 +222,14 @@ func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, t
 			"commands":    []string{},
 			"permissions": map[string]interface{}{},
 			"auth": map[string]interface{}{
-				"token": token,
+				authState.connectAuthKey: authState.connectToken,
+			},
+			"device": map[string]interface{}{
+				"id":        identity.DeviceID,
+				"publicKey": publicKeyRawBase64URLFromPEM(identity.PublicKeyPEM),
+				"signature": signature,
+				"signedAt":  signedAtMs,
+				"nonce":     challenge.Payload.Nonce,
 			},
 			"locale":    "zh-CN",
 			"userAgent": fmt.Sprintf("openclaw-daemon/%s", a.cfg.DaemonVersion),
@@ -205,8 +263,28 @@ func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, t
 		if !res.OK {
 			return gatewayResponseError("connect rejected", res.Error)
 		}
-		return nil
+		return a.handleHelloOKAfterConnect(ctx, conn)
 	}
+}
+
+func (a *Adapter) handleHelloOKAfterConnect(ctx context.Context, conn *websocket.Conn) error {
+	helloRaw, err := a.readJSON(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("read hello-ok: %w", err)
+	}
+	var hello helloOKFrame
+	if err := json.Unmarshal(helloRaw, &hello); err != nil {
+		return fmt.Errorf("parse hello-ok: %w", err)
+	}
+	if hello.Type != "hello-ok" {
+		return fmt.Errorf("unexpected post-connect frame type=%s", hello.Type)
+	}
+	if hello.Auth != nil && strings.TrimSpace(hello.Auth.DeviceToken) != "" {
+		if err := a.persistGatewayDeviceToken(strings.TrimSpace(hello.Auth.DeviceToken)); err != nil {
+			a.logger.Printf("persist gateway device token failed: %v", err)
+		}
+	}
+	return nil
 }
 
 func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload protocol.ChatMessagePayload, cloudMsgID string) (string, error) {
@@ -370,6 +448,164 @@ func (a *Adapter) loadGatewayToken() (string, error) {
 		return trimEnvValue(value), nil
 	}
 	return "", fmt.Errorf("gateway token %q is missing", envKey)
+}
+
+func (a *Adapter) resolveConnectAuth() (connectAuth, error) {
+	deviceToken := strings.TrimSpace(a.loadStoredGatewayDeviceToken())
+	if deviceToken != "" {
+		return connectAuth{
+			headerToken:    deviceToken,
+			connectToken:   deviceToken,
+			connectAuthKey: "deviceToken",
+			signatureToken: deviceToken,
+		}, nil
+	}
+	token, err := a.loadGatewayToken()
+	if err != nil {
+		return connectAuth{}, err
+	}
+	return connectAuth{
+		headerToken:    token,
+		connectToken:   token,
+		connectAuthKey: "token",
+		signatureToken: token,
+	}, nil
+}
+
+func (a *Adapter) loadStoredGatewayDeviceToken() string {
+	if a.stateStore == nil {
+		return ""
+	}
+	state, err := a.stateStore.Load()
+	if err != nil {
+		a.logger.Printf("load state for gateway device token failed: %v", err)
+		return ""
+	}
+	return state.GatewayDeviceToken
+}
+
+func (a *Adapter) persistGatewayDeviceToken(deviceToken string) error {
+	if a.stateStore == nil || strings.TrimSpace(deviceToken) == "" {
+		return nil
+	}
+	state, err := a.stateStore.Load()
+	if err != nil {
+		return err
+	}
+	state.GatewayDeviceToken = strings.TrimSpace(deviceToken)
+	return a.stateStore.Save(state)
+}
+
+func (a *Adapter) loadOrCreateGatewayIdentity() (*store.DeviceIdentity, error) {
+	if a.stateStore == nil {
+		return createDeviceIdentity()
+	}
+	state, err := a.stateStore.Load()
+	if err != nil {
+		return nil, err
+	}
+	if state.GatewayDeviceIdentity != nil &&
+		strings.TrimSpace(state.GatewayDeviceIdentity.DeviceID) != "" &&
+		strings.TrimSpace(state.GatewayDeviceIdentity.PublicKeyPEM) != "" &&
+		strings.TrimSpace(state.GatewayDeviceIdentity.PrivateKeyPEM) != "" {
+		return state.GatewayDeviceIdentity, nil
+	}
+	identity, err := createDeviceIdentity()
+	if err != nil {
+		return nil, err
+	}
+	state.GatewayDeviceIdentity = identity
+	if err := a.stateStore.Save(state); err != nil {
+		return nil, err
+	}
+	return identity, nil
+}
+
+type deviceAuthPayloadParams struct {
+	deviceID     string
+	clientID     string
+	clientMode   string
+	role         string
+	scopes       []string
+	signedAtMs   int64
+	token        string
+	nonce        string
+	platform     string
+	deviceFamily string
+}
+
+func buildDeviceAuthPayloadV3(params deviceAuthPayloadParams) string {
+	return strings.Join([]string{
+		"v3",
+		params.deviceID,
+		params.clientID,
+		params.clientMode,
+		params.role,
+		strings.Join(params.scopes, ","),
+		fmt.Sprintf("%d", params.signedAtMs),
+		params.token,
+		params.nonce,
+		normalizeDeviceMetadataForAuth(params.platform),
+		normalizeDeviceMetadataForAuth(params.deviceFamily),
+	}, "|")
+}
+
+func normalizeDeviceMetadataForAuth(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func createDeviceIdentity() (*store.DeviceIdentity, error) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	publicDER, err := x509.MarshalPKIXPublicKey(publicKey)
+	if err != nil {
+		return nil, err
+	}
+	privateDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return nil, err
+	}
+	deviceID := sha256.Sum256(publicKey)
+	return &store.DeviceIdentity{
+		DeviceID:      fmt.Sprintf("%x", deviceID[:]),
+		PublicKeyPEM:  string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})),
+		PrivateKeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})),
+	}, nil
+}
+
+func signDevicePayload(privateKeyPEM, payload string) (string, error) {
+	block, _ := pem.Decode([]byte(privateKeyPEM))
+	if block == nil {
+		return "", fmt.Errorf("decode private key pem")
+	}
+	privateAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	privateKey, ok := privateAny.(ed25519.PrivateKey)
+	if !ok {
+		return "", fmt.Errorf("private key is not ed25519")
+	}
+	signature := ed25519.Sign(privateKey, []byte(payload))
+	return base64.RawURLEncoding.EncodeToString(signature), nil
+}
+
+func publicKeyRawBase64URLFromPEM(publicKeyPEM string) string {
+	block, _ := pem.Decode([]byte(publicKeyPEM))
+	if block == nil {
+		return ""
+	}
+	publicAny, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return ""
+	}
+	publicKey, ok := publicAny.(ed25519.PublicKey)
+	if !ok {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(publicKey)
 }
 
 func (a *Adapter) writeJSON(ctx context.Context, conn *websocket.Conn, value interface{}) error {

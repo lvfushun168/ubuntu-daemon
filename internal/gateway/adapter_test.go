@@ -16,6 +16,7 @@ import (
 
 	"openclaw/dameon/internal/config"
 	"openclaw/dameon/internal/protocol"
+	"openclaw/dameon/internal/store"
 )
 
 func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
@@ -55,6 +56,10 @@ func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
 		if auth["token"] != "token-1" {
 			t.Fatalf("unexpected connect token: %#v", auth)
 		}
+		device := connectParams["device"].(map[string]interface{})
+		if device["id"] == "" || device["publicKey"] == "" || device["signature"] == "" || device["nonce"] != "nonce-1" {
+			t.Fatalf("unexpected device params: %#v", device)
+		}
 		client := connectParams["client"].(map[string]interface{})
 		if client["id"] != "cli" || client["mode"] != "cli" {
 			t.Fatalf("unexpected client params: %#v", client)
@@ -66,6 +71,16 @@ func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
 			"payload": map[string]interface{}{"status": "ok"},
 		}); err != nil {
 			t.Fatalf("write connect response: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "hello-ok",
+			"auth": map[string]interface{}{
+				"deviceToken": "device-token-1",
+				"role":        "operator",
+				"scopes":      []string{"operator.read", "operator.write"},
+			},
+		}); err != nil {
+			t.Fatalf("write hello-ok: %v", err)
 		}
 
 		var chatReq map[string]interface{}
@@ -155,6 +170,13 @@ func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
 	if replies[1].Text != " there" || !replies[1].IsFinal || !replies[1].IsEnd || replies[1].FinishReason != "stop" {
 		t.Fatalf("unexpected final reply: %+v", replies[1])
 	}
+	state, err := store.NewFileStore(filepath.Join(filepath.Dir(adapter.cfg.Store.StateFile), filepath.Base(adapter.cfg.Store.StateFile))).Load()
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	if state.GatewayDeviceToken != "device-token-1" {
+		t.Fatalf("expected persisted device token, got %+v", state)
+	}
 }
 
 func TestAdapterChatFailsWhenGatewayTokenMissing(t *testing.T) {
@@ -166,6 +188,9 @@ func TestAdapterChatFailsWhenGatewayTokenMissing(t *testing.T) {
 	cfg := &config.Config{
 		DeviceID:      "device-1",
 		DaemonVersion: "0.1.0",
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
 		OpenClaw: config.OpenClawConfig{
 			EnvFile:            envPath,
 			GatewayWSURL:       "ws://127.0.0.1:18789",
@@ -173,7 +198,7 @@ func TestAdapterChatFailsWhenGatewayTokenMissing(t *testing.T) {
 		},
 	}
 
-	adapter := NewAdapter(cfg, log.New(os.Stdout, "", 0))
+	adapter := NewAdapter(cfg, log.New(os.Stdout, "", 0), store.NewFileStore(cfg.Store.StateFile))
 	_, err := adapter.Chat(context.Background(), protocol.ChatMessagePayload{
 		SessionID: "session-1",
 		Role:      "user",
@@ -196,11 +221,14 @@ func newTestAdapter(t *testing.T, wsURL, token string) *Adapter {
 	cfg := &config.Config{
 		DeviceID:      "device-1",
 		DaemonVersion: "0.1.0",
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
 		OpenClaw: config.OpenClawConfig{
 			EnvFile:            envPath,
 			GatewayWSURL:       wsURL,
 			GatewayTokenEnvKey: "OPENCLAW_GATEWAY_TOKEN",
 		},
 	}
-	return NewAdapter(cfg, log.New(os.Stdout, "", 0))
+	return NewAdapter(cfg, log.New(os.Stdout, "", 0), store.NewFileStore(cfg.Store.StateFile))
 }

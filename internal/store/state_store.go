@@ -9,8 +9,16 @@ import (
 	"sync"
 )
 
+type DeviceIdentity struct {
+	DeviceID      string `json:"device_id"`
+	PublicKeyPEM  string `json:"public_key_pem"`
+	PrivateKeyPEM string `json:"private_key_pem"`
+}
+
 type State struct {
-	LastConfigVersion int64 `json:"last_config_version"`
+	LastConfigVersion     int64           `json:"last_config_version"`
+	GatewayDeviceToken    string          `json:"gateway_device_token,omitempty"`
+	GatewayDeviceIdentity *DeviceIdentity `json:"gateway_device_identity,omitempty"`
 }
 
 type FileStore struct {
@@ -51,7 +59,7 @@ func (s *FileStore) Save(state State) error {
 	if err != nil {
 		return fmt.Errorf("marshal state file: %w", err)
 	}
-	return writeAtomically(s.path, data, 0o644)
+	return writeAtomically(s.path, data, 0o600)
 }
 
 func writeAtomically(path string, data []byte, mode os.FileMode) error {
