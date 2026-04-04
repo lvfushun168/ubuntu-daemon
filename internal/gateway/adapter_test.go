@@ -438,6 +438,119 @@ func TestAdapterChatHandlesOpenClawFinalStateSchema(t *testing.T) {
 	}
 }
 
+func TestAdapterChatHandlesSessionMessageEvents(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "connect.challenge",
+			"payload": map[string]interface{}{
+				"nonce": "nonce-4",
+			},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "session-4",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-4",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "session.message",
+			"payload": map[string]interface{}{
+				"runId":      "run-4",
+				"sessionKey": "session-4",
+				"state":      "final",
+				"message": map[string]interface{}{
+					"role": "assistant",
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": "OK",
+						},
+					},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write session.message event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	adapter := newTestAdapter(t, wsURL, "token-4")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "session-4",
+		Role:      "user",
+		Text:      "please reply ok",
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-4",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "OK" || !replies[0].IsFinal || !replies[0].IsEnd || replies[0].FinishReason != "stop" {
+		t.Fatalf("unexpected final reply: %+v", replies[0])
+	}
+}
+
 func TestAdapterChatFailsWhenGatewayTokenMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	envPath := filepath.Join(tmpDir, ".env")

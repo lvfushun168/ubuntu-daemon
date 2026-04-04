@@ -29,7 +29,7 @@ import (
 const (
 	defaultGatewayWSURL = "ws://127.0.0.1:18789"
 	writeTimeout        = 5 * time.Second
-	readTimeout         = 30 * time.Second
+	readTimeout         = 90 * time.Second
 )
 
 type Adapter struct {
@@ -334,7 +334,7 @@ func (a *Adapter) handleControlFrame(frameRaw []byte) bool {
 		a.persistHelloOK(hello)
 		return true
 	case "event":
-		if envelope.Event == "chat" {
+		if envelope.Event == "chat" || envelope.Event == "session.message" {
 			return false
 		}
 		a.logger.Printf("ignoring control event after connect type=%s event=%s", envelope.Type, envelope.Event)
@@ -438,7 +438,7 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 		if err := json.Unmarshal(frameRaw, &event); err != nil {
 			continue
 		}
-		if event.Event != "chat" {
+		if event.Event != "chat" && event.Event != "session.message" {
 			continue
 		}
 
