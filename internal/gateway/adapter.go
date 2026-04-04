@@ -114,6 +114,10 @@ func (a *Adapter) Chat(ctx context.Context, payload protocol.ChatMessagePayload)
 		cloudMsgID = fmt.Sprintf("chat-%d", time.Now().UnixMilli())
 	}
 
+	if err := a.subscribeSessionMessages(ctx, conn, payload.SessionID); err != nil {
+		return nil, err
+	}
+
 	runID, err := a.sendChat(ctx, conn, payload, cloudMsgID)
 	if err != nil {
 		return nil, err
@@ -166,6 +170,50 @@ func (a *Adapter) connect(ctx context.Context) (*websocket.Conn, error) {
 		return nil, err
 	}
 	return conn, nil
+}
+
+func (a *Adapter) subscribeSessionMessages(ctx context.Context, conn *websocket.Conn, sessionID string) error {
+	reqID := fmt.Sprintf("session-sub-%d", time.Now().UnixMilli())
+	if err := a.writeJSON(ctx, conn, gatewayRequest{
+		Type:   "req",
+		ID:     reqID,
+		Method: "sessions.messages.subscribe",
+		Params: map[string]interface{}{
+			"key": sessionID,
+		},
+	}); err != nil {
+		return fmt.Errorf("send sessions.messages.subscribe request: %w", err)
+	}
+
+	for {
+		frameRaw, err := a.readJSON(ctx, conn)
+		if err != nil {
+			return fmt.Errorf("read sessions.messages.subscribe response: %w", err)
+		}
+
+		var envelope struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		}
+		if err := json.Unmarshal(frameRaw, &envelope); err != nil {
+			continue
+		}
+		if a.handleControlFrame(frameRaw) {
+			continue
+		}
+		if envelope.Type != "res" || envelope.ID != reqID {
+			continue
+		}
+
+		var res gatewayResponse
+		if err := json.Unmarshal(frameRaw, &res); err != nil {
+			return fmt.Errorf("parse sessions.messages.subscribe response: %w", err)
+		}
+		if !res.OK {
+			return gatewayResponseError("sessions.messages.subscribe rejected", res.Error)
+		}
+		return nil
+	}
 }
 
 func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, authState connectAuth, identity *store.DeviceIdentity) error {
@@ -263,28 +311,45 @@ func (a *Adapter) completeHandshake(ctx context.Context, conn *websocket.Conn, a
 		if !res.OK {
 			return gatewayResponseError("connect rejected", res.Error)
 		}
-		return a.handleHelloOKAfterConnect(ctx, conn)
+		return nil
 	}
 }
 
-func (a *Adapter) handleHelloOKAfterConnect(ctx context.Context, conn *websocket.Conn) error {
-	helloRaw, err := a.readJSON(ctx, conn)
-	if err != nil {
-		return fmt.Errorf("read hello-ok: %w", err)
+func (a *Adapter) handleControlFrame(frameRaw []byte) bool {
+	var envelope struct {
+		Type  string `json:"type"`
+		Event string `json:"event"`
 	}
-	var hello helloOKFrame
-	if err := json.Unmarshal(helloRaw, &hello); err != nil {
-		return fmt.Errorf("parse hello-ok: %w", err)
+	if err := json.Unmarshal(frameRaw, &envelope); err != nil {
+		return false
 	}
-	if hello.Type != "hello-ok" {
-		return fmt.Errorf("unexpected post-connect frame type=%s", hello.Type)
+
+	switch envelope.Type {
+	case "hello-ok":
+		var hello helloOKFrame
+		if err := json.Unmarshal(frameRaw, &hello); err != nil {
+			a.logger.Printf("parse hello-ok failed: %v", err)
+			return true
+		}
+		a.persistHelloOK(hello)
+		return true
+	case "event":
+		if envelope.Event == "chat" {
+			return false
+		}
+		a.logger.Printf("ignoring control event after connect type=%s event=%s", envelope.Type, envelope.Event)
+		return true
+	default:
+		return false
 	}
+}
+
+func (a *Adapter) persistHelloOK(hello helloOKFrame) {
 	if hello.Auth != nil && strings.TrimSpace(hello.Auth.DeviceToken) != "" {
 		if err := a.persistGatewayDeviceToken(strings.TrimSpace(hello.Auth.DeviceToken)); err != nil {
 			a.logger.Printf("persist gateway device token failed: %v", err)
 		}
 	}
-	return nil
 }
 
 func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload protocol.ChatMessagePayload, cloudMsgID string) (string, error) {
@@ -292,10 +357,7 @@ func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload pr
 	params := map[string]interface{}{
 		"sessionKey":     payload.SessionID,
 		"idempotencyKey": cloudMsgID,
-		"text":           payload.Text,
-	}
-	if len(payload.Metadata) > 0 {
-		params["metadata"] = payload.Metadata
+		"message":        payload.Text,
 	}
 
 	if err := a.writeJSON(ctx, conn, gatewayRequest{
@@ -318,6 +380,9 @@ func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload pr
 			ID   string `json:"id"`
 		}
 		if err := json.Unmarshal(frameRaw, &envelope); err != nil {
+			continue
+		}
+		if a.handleControlFrame(frameRaw) {
 			continue
 		}
 		if envelope.Type != "res" || envelope.ID != reqID {
@@ -360,6 +425,9 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(frameRaw, &envelope); err != nil {
+			continue
+		}
+		if a.handleControlFrame(frameRaw) {
 			continue
 		}
 		if envelope.Type != "event" {
@@ -711,7 +779,7 @@ func deepString(value interface{}) string {
 func isTerminalChatEvent(payload map[string]interface{}) bool {
 	status := strings.ToLower(firstString(payload, "status", "phase", "state"))
 	switch status {
-	case "done", "completed", "complete", "ok", "stopped", "aborted", "cancelled", "canceled", "error", "failed":
+	case "done", "completed", "complete", "ok", "final", "stopped", "aborted", "cancelled", "canceled", "error", "failed":
 		return true
 	}
 	if value, ok := payload["isFinal"].(bool); ok && value {

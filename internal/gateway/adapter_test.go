@@ -83,6 +83,29 @@ func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
 			t.Fatalf("write hello-ok: %v", err)
 		}
 
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if subscribeReq["method"] != "sessions.messages.subscribe" {
+			t.Fatalf("unexpected subscribe method: %#v", subscribeReq)
+		}
+		subscribeParams := subscribeReq["params"].(map[string]interface{})
+		if subscribeParams["key"] != "session-1" {
+			t.Fatalf("unexpected subscribe params: %#v", subscribeParams)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "session-1",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
 		var chatReq map[string]interface{}
 		if err := conn.ReadJSON(&chatReq); err != nil {
 			t.Fatalf("read chat request: %v", err)
@@ -97,7 +120,7 @@ func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
 		if chatParams["idempotencyKey"] != "msg-1" {
 			t.Fatalf("unexpected idempotency key: %#v", chatParams)
 		}
-		if chatParams["text"] != "hello" {
+		if chatParams["message"] != "hello" {
 			t.Fatalf("unexpected chat params: %#v", chatParams)
 		}
 		if err := conn.WriteJSON(map[string]interface{}{
@@ -176,6 +199,242 @@ func TestAdapterChatCompletesGatewayHandshakeAndStreamsReply(t *testing.T) {
 	}
 	if state.GatewayDeviceToken != "device-token-1" {
 		t.Fatalf("expected persisted device token, got %+v", state)
+	}
+}
+
+func TestAdapterChatIgnoresUnexpectedEventAfterConnect(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "connect.challenge",
+			"payload": map[string]interface{}{
+				"nonce": "nonce-2",
+			},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "node.changed",
+			"payload": map[string]interface{}{
+				"nodeId": "n-1",
+			},
+		}); err != nil {
+			t.Fatalf("write unexpected post-connect event: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if subscribeReq["method"] != "sessions.messages.subscribe" {
+			t.Fatalf("unexpected subscribe method: %#v", subscribeReq)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "session-2",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if chatReq["method"] != "chat.send" {
+			t.Fatalf("unexpected chat method: %#v", chatReq)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId": "run-2",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "chat",
+			"payload": map[string]interface{}{
+				"runId":      "run-2",
+				"sessionKey": "session-2",
+				"delta":      "done",
+				"status":     "done",
+			},
+		}); err != nil {
+			t.Fatalf("write chat event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	adapter := newTestAdapter(t, wsURL, "token-2")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "session-2",
+		Role:      "user",
+		Text:      "hello again",
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "done" || !replies[0].IsFinal || !replies[0].IsEnd {
+		t.Fatalf("unexpected reply: %+v", replies[0])
+	}
+}
+
+func TestAdapterChatHandlesOpenClawFinalStateSchema(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "connect.challenge",
+			"payload": map[string]interface{}{
+				"nonce": "nonce-3",
+			},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if subscribeReq["method"] != "sessions.messages.subscribe" {
+			t.Fatalf("unexpected subscribe method: %#v", subscribeReq)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "session-3",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-3",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "chat",
+			"payload": map[string]interface{}{
+				"runId":      "run-3",
+				"sessionKey": "session-3",
+				"seq":        1,
+				"state":      "final",
+				"message": map[string]interface{}{
+					"role": "assistant",
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": "OK",
+						},
+					},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write chat final event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	adapter := newTestAdapter(t, wsURL, "token-3")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "session-3",
+		Role:      "user",
+		Text:      "please reply ok",
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-3",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "OK" || !replies[0].IsFinal || !replies[0].IsEnd || replies[0].FinishReason != "stop" {
+		t.Fatalf("unexpected final reply: %+v", replies[0])
 	}
 }
 
