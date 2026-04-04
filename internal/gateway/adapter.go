@@ -411,6 +411,7 @@ func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload pr
 func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, sessionID, runID string) ([]protocol.ChatReplyPayload, error) {
 	replies := make([]protocol.ChatReplyPayload, 0, 8)
 	chunkSeq := 0
+	assembledText := ""
 
 	for {
 		frameRaw, err := a.readJSON(ctx, conn)
@@ -453,11 +454,13 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 		}
 
 		text := extractText(payloadMap)
-		if text != "" {
+		deltaText, nextAssembledText := incrementalReplyText(assembledText, text)
+		assembledText = nextAssembledText
+		if deltaText != "" {
 			chunkSeq++
 			replies = append(replies, protocol.ChatReplyPayload{
 				Role:     "assistant",
-				Text:     text,
+				Text:     deltaText,
 				ChunkSeq: chunkSeq,
 			})
 		}
@@ -752,6 +755,23 @@ func extractText(payload map[string]interface{}) string {
 		return builder.String()
 	}
 	return ""
+}
+
+func incrementalReplyText(assembledText, currentText string) (string, string) {
+	currentText = strings.TrimSpace(currentText)
+	if currentText == "" {
+		return "", assembledText
+	}
+	if assembledText == "" {
+		return currentText, currentText
+	}
+	if currentText == assembledText {
+		return "", assembledText
+	}
+	if strings.HasPrefix(currentText, assembledText) {
+		return currentText[len(assembledText):], currentText
+	}
+	return currentText, assembledText + currentText
 }
 
 func deepString(value interface{}) string {
