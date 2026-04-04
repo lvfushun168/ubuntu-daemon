@@ -63,13 +63,26 @@ type ChatMessagePayload struct {
 }
 
 type ChatReplyPayload struct {
-	SessionID    string `json:"session_id"`
-	Role         string `json:"role"`
-	Text         string `json:"text"`
-	ChunkSeq     int    `json:"chunk_seq"`
-	IsFinal      bool   `json:"is_final"`
-	IsEnd        bool   `json:"is_end"`
-	FinishReason string `json:"finish_reason,omitempty"`
+	SessionID    string           `json:"session_id"`
+	Role         string           `json:"role"`
+	Text         string           `json:"text"`
+	ChunkSeq     int              `json:"chunk_seq"`
+	IsFinal      bool             `json:"is_final"`
+	IsEnd        bool             `json:"is_end"`
+	FinishReason string           `json:"finish_reason,omitempty"`
+	ErrorCode    string           `json:"error_code,omitempty"`
+	ErrorMessage string           `json:"error_message,omitempty"`
+	Attachments  []ChatAttachment `json:"attachments,omitempty"`
+}
+
+type ChatAttachment struct {
+	MediaID      string `json:"media_id,omitempty"`
+	MediaType    string `json:"media_type,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	PreviewURL   string `json:"preview_url,omitempty"`
+	ThumbnailURL string `json:"thumbnail_url,omitempty"`
+	LocalPath    string `json:"local_path,omitempty"`
+	FileSize     int64  `json:"file_size,omitempty"`
 	ErrorCode    string `json:"error_code,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }

@@ -20,6 +20,10 @@
     "restart_timeout_sec": 20,
     "health_check_timeout_sec": 5
   },
+  "media": {
+    "backend_base_url": "http://43.156.161.7:8080",
+    "upload_token": "123456"
+  },
   "remote_command": {
     "default_timeout_sec": 30,
     "max_timeout_sec": 300,

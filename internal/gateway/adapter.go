@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -11,10 +12,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -37,6 +40,7 @@ type Adapter struct {
 	logger     *log.Logger
 	dialer     *websocket.Dialer
 	stateStore *store.FileStore
+	httpClient *http.Client
 }
 
 type gatewayChallenge struct {
@@ -76,6 +80,40 @@ type gatewayError struct {
 	Message string `json:"message,omitempty"`
 }
 
+type mediaUploadInitRequest struct {
+	DeviceUUID string `json:"deviceUuid"`
+	SessionID  string `json:"sessionId,omitempty"`
+	MsgID      string `json:"msgId,omitempty"`
+	MediaType  string `json:"mediaType"`
+	OriginName string `json:"originName,omitempty"`
+	FileSize   int64  `json:"fileSize"`
+}
+
+type mediaUploadInitData struct {
+	MediaID    string `json:"mediaId"`
+	UploadURL  string `json:"uploadUrl"`
+	PreviewURL string `json:"previewUrl"`
+}
+
+type mediaUploadCompleteRequest struct {
+	MediaID  string `json:"mediaId"`
+	MimeType string `json:"mimeType,omitempty"`
+	FileSize int64  `json:"fileSize,omitempty"`
+}
+
+type mediaUploadCompleteData struct {
+	MediaID    string `json:"mediaId"`
+	PreviewURL string `json:"previewUrl"`
+	Status     string `json:"status"`
+}
+
+type resultWrapper[T any] struct {
+	Code      int    `json:"code"`
+	Message   string `json:"message"`
+	ErrorCode string `json:"errorCode"`
+	Data      T      `json:"data"`
+}
+
 type helloOKFrame struct {
 	Type string `json:"type"`
 	Auth *struct {
@@ -99,6 +137,7 @@ func NewAdapter(cfg *config.Config, logger *log.Logger, stateStore *store.FileSt
 		logger:     logger,
 		dialer:     &websocket.Dialer{HandshakeTimeout: 10 * time.Second},
 		stateStore: stateStore,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -123,7 +162,7 @@ func (a *Adapter) Chat(ctx context.Context, payload protocol.ChatMessagePayload)
 		return nil, err
 	}
 
-	replies, err := a.collectChatReplies(ctx, conn, payload.SessionID, runID)
+	replies, err := a.collectChatReplies(ctx, conn, payload.SessionID, runID, cloudMsgID)
 	if err != nil {
 		return nil, err
 	}
@@ -408,10 +447,11 @@ func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload pr
 	}
 }
 
-func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, sessionID, runID string) ([]protocol.ChatReplyPayload, error) {
+func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, sessionID, runID, cloudMsgID string) ([]protocol.ChatReplyPayload, error) {
 	replies := make([]protocol.ChatReplyPayload, 0, 8)
 	chunkSeq := 0
 	assembledText := ""
+	attachments := make([]protocol.ChatAttachment, 0, 2)
 
 	for {
 		frameRaw, err := a.readJSON(ctx, conn)
@@ -465,6 +505,9 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			})
 		}
 
+		attachments = append(attachments, extractMediaAttachments(payloadMap, assembledText)...)
+		attachments = deduplicateAttachments(attachments)
+
 		if isTerminalChatEvent(payloadMap) {
 			if len(replies) == 0 {
 				chunkSeq++
@@ -479,6 +522,10 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			replies[last].IsFinal = true
 			replies[last].IsEnd = true
 			replies[last].FinishReason = finishReason(payloadMap)
+			attachments = a.uploadLocalAttachments(ctx, sessionID, cloudMsgID, attachments)
+			if len(attachments) > 0 {
+				replies[last].Attachments = attachments
+			}
 
 			if code := firstString(payloadMap, "errorCode", "code"); code != "" && replies[last].FinishReason == "error" {
 				replies[last].ErrorCode = code
@@ -848,6 +895,301 @@ func gatewayResponseError(prefix string, errPayload *gatewayError) error {
 		return fmt.Errorf("%s: %s", prefix, errPayload.Code)
 	}
 	return errors.New(prefix)
+}
+
+func extractMediaAttachments(payload map[string]interface{}, assembledText string) []protocol.ChatAttachment {
+	attachments := make([]protocol.ChatAttachment, 0, 2)
+	for _, line := range extractMediaLines(assembledText) {
+		attachments = append(attachments, mediaAttachmentFromRef(line))
+	}
+	for _, ref := range extractMediaRefsFromPayload(payload) {
+		attachments = append(attachments, mediaAttachmentFromRef(ref))
+	}
+	return attachments
+}
+
+func extractMediaLines(text string) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+	results := make([]string, 0, 2)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToUpper(trimmed), "MEDIA:") {
+			ref := strings.TrimSpace(trimmed[len("MEDIA:"):])
+			if ref != "" {
+				results = append(results, ref)
+			}
+		}
+	}
+	return results
+}
+
+func extractMediaRefsFromPayload(payload map[string]interface{}) []string {
+	if len(payload) == 0 {
+		return nil
+	}
+	results := make([]string, 0, 2)
+	for _, key := range []string{"mediaUrl", "media_url", "url"} {
+		if text := strings.TrimSpace(deepString(payload[key])); text != "" {
+			results = append(results, text)
+		}
+	}
+	for _, key := range []string{"mediaUrls", "media_urls", "urls"} {
+		items, ok := payload[key].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, item := range items {
+			if text := strings.TrimSpace(deepString(item)); text != "" {
+				results = append(results, text)
+			}
+		}
+	}
+	return results
+}
+
+func mediaAttachmentFromRef(ref string) protocol.ChatAttachment {
+	ref = strings.TrimSpace(ref)
+	attachment := protocol.ChatAttachment{
+		MediaType: detectMediaType(ref),
+		MimeType:  detectMimeType(ref),
+	}
+	if isHTTPURL(ref) {
+		attachment.PreviewURL = ref
+	} else {
+		attachment.LocalPath = ref
+		attachment.ErrorCode = "MEDIA_LOCAL_PATH_PENDING_UPLOAD"
+		attachment.ErrorMessage = "local media path requires daemon upload workflow"
+	}
+	return attachment
+}
+
+func (a *Adapter) uploadLocalAttachments(ctx context.Context, sessionID, cloudMsgID string, attachments []protocol.ChatAttachment) []protocol.ChatAttachment {
+	for i := range attachments {
+		item := &attachments[i]
+		if strings.TrimSpace(item.LocalPath) == "" {
+			continue
+		}
+		if err := a.uploadAttachmentFile(ctx, sessionID, cloudMsgID, item); err != nil {
+			item.ErrorCode = "MEDIA_UPLOAD_FAILED"
+			item.ErrorMessage = err.Error()
+			a.logger.Printf("upload local media failed path=%s err=%v", item.LocalPath, err)
+		}
+	}
+	return attachments
+}
+
+func (a *Adapter) uploadAttachmentFile(ctx context.Context, sessionID, cloudMsgID string, item *protocol.ChatAttachment) error {
+	mediaCfg := a.cfg.MediaConfig()
+	backendBase := strings.TrimSpace(mediaCfg.BackendBaseURL)
+	if backendBase == "" {
+		return fmt.Errorf("media.backend_base_url is empty")
+	}
+	backendBase = strings.TrimRight(backendBase, "/")
+	stat, err := os.Stat(item.LocalPath)
+	if err != nil {
+		return fmt.Errorf("stat media file: %w", err)
+	}
+	if stat.IsDir() {
+		return fmt.Errorf("media path is directory: %s", item.LocalPath)
+	}
+	initReq := mediaUploadInitRequest{
+		DeviceUUID: a.cfg.DeviceID,
+		SessionID:  sessionID,
+		MsgID:      cloudMsgID,
+		MediaType:  normalizeMediaType(item.MediaType),
+		OriginName: filepath.Base(item.LocalPath),
+		FileSize:   stat.Size(),
+	}
+	initData, err := a.callUploadInit(ctx, backendBase, initReq)
+	if err != nil {
+		return err
+	}
+	if err := a.putFileToPresignedURL(ctx, initData.UploadURL, item.LocalPath, item.MimeType); err != nil {
+		return err
+	}
+	completeData, err := a.callUploadComplete(ctx, backendBase, mediaUploadCompleteRequest{
+		MediaID:  initData.MediaID,
+		MimeType: item.MimeType,
+		FileSize: stat.Size(),
+	})
+	if err != nil {
+		return err
+	}
+	item.MediaID = initData.MediaID
+	item.FileSize = stat.Size()
+	item.LocalPath = ""
+	item.ErrorCode = ""
+	item.ErrorMessage = ""
+	if strings.TrimSpace(completeData.PreviewURL) != "" {
+		item.PreviewURL = completeData.PreviewURL
+	} else if strings.TrimSpace(initData.PreviewURL) != "" {
+		item.PreviewURL = initData.PreviewURL
+	}
+	return nil
+}
+
+func normalizeMediaType(raw string) string {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "image" || value == "video" {
+		return value
+	}
+	return "image"
+}
+
+func (a *Adapter) callUploadInit(ctx context.Context, backendBase string, payload mediaUploadInitRequest) (mediaUploadInitData, error) {
+	endpoint := backendBase + "/internal/media/upload-init"
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return mediaUploadInitData{}, fmt.Errorf("marshal upload-init payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return mediaUploadInitData{}, fmt.Errorf("build upload-init request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token := strings.TrimSpace(a.cfg.MediaConfig().UploadToken); token != "" {
+		req.Header.Set("X-Device-Upload-Token", token)
+	}
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return mediaUploadInitData{}, fmt.Errorf("request upload-init: %w", err)
+	}
+	defer resp.Body.Close()
+	var result resultWrapper[mediaUploadInitData]
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return mediaUploadInitData{}, fmt.Errorf("decode upload-init response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || result.Code != 200 {
+		return mediaUploadInitData{}, fmt.Errorf("upload-init failed http=%d code=%d errorCode=%s message=%s",
+			resp.StatusCode, result.Code, result.ErrorCode, result.Message)
+	}
+	if strings.TrimSpace(result.Data.UploadURL) == "" || strings.TrimSpace(result.Data.MediaID) == "" {
+		return mediaUploadInitData{}, fmt.Errorf("upload-init response missing uploadUrl/mediaId")
+	}
+	return result.Data, nil
+}
+
+func (a *Adapter) putFileToPresignedURL(ctx context.Context, uploadURL, localPath, mimeType string) error {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("open media file: %w", err)
+	}
+	defer file.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, file)
+	if err != nil {
+		return fmt.Errorf("build presigned put request: %w", err)
+	}
+	if strings.TrimSpace(mimeType) != "" {
+		req.Header.Set("Content-Type", mimeType)
+	}
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("put media file: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("put media file failed http=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func (a *Adapter) callUploadComplete(ctx context.Context, backendBase string, payload mediaUploadCompleteRequest) (mediaUploadCompleteData, error) {
+	endpoint := backendBase + "/internal/media/upload-complete"
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return mediaUploadCompleteData{}, fmt.Errorf("marshal upload-complete payload: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return mediaUploadCompleteData{}, fmt.Errorf("build upload-complete request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token := strings.TrimSpace(a.cfg.MediaConfig().UploadToken); token != "" {
+		req.Header.Set("X-Device-Upload-Token", token)
+	}
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return mediaUploadCompleteData{}, fmt.Errorf("request upload-complete: %w", err)
+	}
+	defer resp.Body.Close()
+	var result resultWrapper[mediaUploadCompleteData]
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return mediaUploadCompleteData{}, fmt.Errorf("decode upload-complete response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || result.Code != 200 {
+		return mediaUploadCompleteData{}, fmt.Errorf("upload-complete failed http=%d code=%d errorCode=%s message=%s",
+			resp.StatusCode, result.Code, result.ErrorCode, result.Message)
+	}
+	return result.Data, nil
+}
+
+func deduplicateAttachments(items []protocol.ChatAttachment) []protocol.ChatAttachment {
+	if len(items) <= 1 {
+		return items
+	}
+	seen := make(map[string]struct{}, len(items))
+	result := make([]protocol.ChatAttachment, 0, len(items))
+	for _, item := range items {
+		key := item.PreviewURL + "|" + item.LocalPath
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, item)
+	}
+	return result
+}
+
+func isHTTPURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "http" || parsed.Scheme == "https"
+}
+
+func detectMediaType(ref string) string {
+	lower := strings.ToLower(filepath.Ext(ref))
+	switch lower {
+	case ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp":
+		return "image"
+	case ".mp4", ".webm", ".mov", ".m4v":
+		return "video"
+	default:
+		return "unknown"
+	}
+}
+
+func detectMimeType(ref string) string {
+	switch strings.ToLower(filepath.Ext(ref)) {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	case ".bmp":
+		return "image/bmp"
+	case ".mp4":
+		return "video/mp4"
+	case ".webm":
+		return "video/webm"
+	case ".mov":
+		return "video/quicktime"
+	case ".m4v":
+		return "video/x-m4v"
+	default:
+		return ""
+	}
 }
 
 func trimEnvValue(value string) string {

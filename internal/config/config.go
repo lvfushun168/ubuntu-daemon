@@ -21,6 +21,7 @@ type Config struct {
 	DaemonVersion          string          `json:"daemon_version"`
 	Cloud                  CloudConfig     `json:"cloud"`
 	OpenClaw               OpenClawConfig  `json:"openclaw"`
+	Media                  MediaConfig     `json:"media"`
 	RemoteCommand          RemoteCmdConfig `json:"remote_command"`
 	Store                  StoreConfig     `json:"store"`
 	ChatReplyOnUnsupported bool            `json:"chat_reply_on_unsupported"`
@@ -52,6 +53,11 @@ type RemoteCmdConfig struct {
 	MaxTimeoutSec     int      `json:"max_timeout_sec"`
 	MaxOutputBytes    int      `json:"max_output_bytes"`
 	Whitelist         []string `json:"whitelist"`
+}
+
+type MediaConfig struct {
+	BackendBaseURL string `json:"backend_base_url"`
+	UploadToken    string `json:"upload_token"`
 }
 
 type StoreConfig struct {
@@ -107,6 +113,10 @@ func defaultConfig() *Config {
 			RestartTimeoutSec:     20,
 			HealthCheckTimeoutSec: 5,
 		},
+		Media: MediaConfig{
+			BackendBaseURL: "http://43.156.161.7:8080",
+			UploadToken:    "",
+		},
 		RemoteCommand: RemoteCmdConfig{
 			DefaultTimeoutSec: 30,
 			MaxTimeoutSec:     300,
@@ -160,6 +170,12 @@ func (c *Config) normalize(path string) error {
 		c.RemoteCommand.MaxOutputBytes = 64 * 1024
 	}
 	return nil
+}
+
+func (c *Config) MediaConfig() MediaConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Media
 }
 
 func (c *Config) CloudWSURL() string {
@@ -267,6 +283,7 @@ func (c *Config) persist() error {
 		DaemonVersion          string          `json:"daemon_version"`
 		Cloud                  CloudConfig     `json:"cloud"`
 		OpenClaw               OpenClawConfig  `json:"openclaw"`
+		Media                  MediaConfig     `json:"media"`
 		RemoteCommand          RemoteCmdConfig `json:"remote_command"`
 		Store                  StoreConfig     `json:"store"`
 		ChatReplyOnUnsupported bool            `json:"chat_reply_on_unsupported"`
@@ -275,6 +292,7 @@ func (c *Config) persist() error {
 		DaemonVersion:          c.DaemonVersion,
 		Cloud:                  c.Cloud,
 		OpenClaw:               c.OpenClaw,
+		Media:                  c.Media,
 		RemoteCommand:          c.RemoteCommand,
 		Store:                  c.Store,
 		ChatReplyOnUnsupported: c.ChatReplyOnUnsupported,
