@@ -451,6 +451,7 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 	replies := make([]protocol.ChatReplyPayload, 0, 8)
 	chunkSeq := 0
 	assembledText := ""
+	pendingSnapshotText := ""
 	attachments := make([]protocol.ChatAttachment, 0, 2)
 
 	for {
@@ -493,22 +494,41 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			continue
 		}
 
-		text := extractText(payloadMap)
-		deltaText, nextAssembledText := incrementalReplyText(assembledText, text)
-		assembledText = nextAssembledText
-		if deltaText != "" {
-			chunkSeq++
-			replies = append(replies, protocol.ChatReplyPayload{
-				Role:     "assistant",
-				Text:     deltaText,
-				ChunkSeq: chunkSeq,
-			})
+		text, textMode := extractChatText(payloadMap)
+		if textMode == chatTextModeDelta {
+			deltaText, nextAssembledText := incrementalReplyText(assembledText, text)
+			assembledText = nextAssembledText
+			if deltaText != "" {
+				chunkSeq++
+				replies = append(replies, protocol.ChatReplyPayload{
+					Role:     "assistant",
+					Text:     deltaText,
+					ChunkSeq: chunkSeq,
+				})
+			}
+		} else if textMode == chatTextModeSnapshot {
+			pendingSnapshotText = strings.Trim(text, "\n")
 		}
 
-		attachments = append(attachments, extractMediaAttachments(payloadMap, assembledText)...)
+		attachmentText := assembledText
+		if pendingSnapshotText != "" {
+			attachmentText = pendingSnapshotText
+		}
+		attachments = append(attachments, extractMediaAttachments(payloadMap, attachmentText)...)
 		attachments = deduplicateAttachments(attachments)
 
 		if isTerminalChatEvent(payloadMap) {
+			if pendingSnapshotText != "" {
+				replies = []protocol.ChatReplyPayload{
+					{
+						Role:     "assistant",
+						Text:     pendingSnapshotText,
+						ChunkSeq: 1,
+					},
+				}
+				chunkSeq = 1
+				assembledText = pendingSnapshotText
+			}
 			if len(replies) == 0 {
 				chunkSeq++
 				replies = append(replies, protocol.ChatReplyPayload{
@@ -786,26 +806,148 @@ func anyStringEquals(values map[string]interface{}, target string, keys ...strin
 	return false
 }
 
-func extractText(payload map[string]interface{}) string {
-	for _, key := range []string{"text", "delta", "content", "message"} {
-		if value := deepString(payload[key]); value != "" {
-			return value
+type chatTextMode string
+
+const (
+	chatTextModeNone     chatTextMode = ""
+	chatTextModeDelta    chatTextMode = "delta"
+	chatTextModeSnapshot chatTextMode = "snapshot"
+)
+
+func extractChatText(payload map[string]interface{}) (string, chatTextMode) {
+	if len(payload) == 0 {
+		return "", chatTextModeNone
+	}
+	if delta, ok := payload["delta"].(string); ok && delta != "" {
+		return delta, chatTextModeDelta
+	}
+	if text := extractAssistantMessageText(payload); text != "" {
+		return text, chatTextModeSnapshot
+	}
+	for _, key := range []string{"content", "parts"} {
+		if text := extractMarkdownBlocks(payload[key]); text != "" {
+			return text, chatTextModeSnapshot
 		}
 	}
-	if items, ok := payload["parts"].([]interface{}); ok {
-		var builder strings.Builder
-		for _, item := range items {
-			if text := deepString(item); text != "" {
-				builder.WriteString(text)
-			}
+	if text, ok := payload["text"].(string); ok && text != "" {
+		return text, chatTextModeSnapshot
+	}
+	return "", chatTextModeNone
+}
+
+func extractAssistantMessageText(payload map[string]interface{}) string {
+	rawMessage, ok := payload["message"]
+	if !ok {
+		return ""
+	}
+	message, ok := rawMessage.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	role := strings.ToLower(strings.TrimSpace(firstString(message, "role")))
+	if role != "" && role != "assistant" {
+		return ""
+	}
+	if text := extractMarkdownBlocks(message["content"]); text != "" {
+		return text
+	}
+	for _, key := range []string{"text", "value"} {
+		if text, ok := message[key].(string); ok && text != "" {
+			return text
 		}
-		return builder.String()
 	}
 	return ""
 }
 
+func extractMarkdownBlocks(value interface{}) string {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		if content, ok := v["content"]; ok {
+			if text := extractMarkdownBlocks(content); text != "" {
+				return text
+			}
+		}
+		if block := markdownFromContentBlock(v); block != "" {
+			return block
+		}
+		return ""
+	case []interface{}:
+		blocks := make([]string, 0, len(v))
+		for _, item := range v {
+			block := extractMarkdownBlocks(item)
+			if strings.TrimSpace(block) == "" {
+				continue
+			}
+			blocks = append(blocks, block)
+		}
+		return joinMarkdownBlocks(blocks)
+	default:
+		return ""
+	}
+}
+
+func markdownFromContentBlock(block map[string]interface{}) string {
+	blockType := strings.ToLower(strings.TrimSpace(firstString(block, "type", "kind")))
+	switch blockType {
+	case "", "text", "markdown", "md":
+		return deepString(block["text"])
+	case "input_text", "output_text":
+		if text := deepString(block["text"]); text != "" {
+			return text
+		}
+		return deepString(block["value"])
+	case "code", "input_code", "output_code":
+		code := firstNonEmptyString(block, "code", "text", "value", "content")
+		if strings.TrimSpace(code) == "" {
+			return ""
+		}
+		language := firstNonEmptyString(block, "language", "lang")
+		return buildMarkdownCodeFence(language, code)
+	default:
+		if text := deepString(block["text"]); text != "" {
+			return text
+		}
+		if text := deepString(block["value"]); text != "" {
+			return text
+		}
+		return ""
+	}
+}
+
+func joinMarkdownBlocks(blocks []string) string {
+	if len(blocks) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	for i, block := range blocks {
+		if i > 0 {
+			prev := blocks[i-1]
+			if !strings.HasSuffix(prev, "\n") {
+				builder.WriteString("\n")
+			}
+			if !strings.HasSuffix(prev, "\n\n") && !strings.HasPrefix(block, "\n") {
+				builder.WriteString("\n")
+			}
+		}
+		builder.WriteString(block)
+	}
+	return builder.String()
+}
+
+func buildMarkdownCodeFence(language, code string) string {
+	code = strings.Trim(code, "\n")
+	if code == "" {
+		return ""
+	}
+	language = strings.TrimSpace(language)
+	if language != "" {
+		return fmt.Sprintf("```%s\n%s\n```", language, code)
+	}
+	return fmt.Sprintf("```\n%s\n```", code)
+}
+
 func incrementalReplyText(assembledText, currentText string) (string, string) {
-	currentText = strings.TrimSpace(currentText)
+	currentText = strings.Trim(currentText, "\n")
 	if currentText == "" {
 		return "", assembledText
 	}
@@ -875,6 +1017,15 @@ func finishReason(payload map[string]interface{}) string {
 func firstString(values map[string]interface{}, keys ...string) string {
 	for _, key := range keys {
 		if text, ok := values[key].(string); ok && strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyString(values map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if text := deepString(values[key]); strings.TrimSpace(text) != "" {
 			return text
 		}
 	}

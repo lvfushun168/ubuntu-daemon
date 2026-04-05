@@ -551,7 +551,7 @@ func TestAdapterChatHandlesSessionMessageEvents(t *testing.T) {
 	}
 }
 
-func TestAdapterChatConvertsCumulativeTextToDeltaChunks(t *testing.T) {
+func TestAdapterChatUsesFinalSnapshotForCumulativeSessionMessages(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -678,15 +678,283 @@ func TestAdapterChatConvertsCumulativeTextToDeltaChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("chat failed: %v", err)
 	}
-	if len(replies) != 2 {
+	if len(replies) != 1 {
 		data, _ := json.Marshal(replies)
-		t.Fatalf("expected 2 replies, got %d %s", len(replies), string(data))
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
 	}
-	if replies[0].Text != "我是" {
-		t.Fatalf("unexpected first delta: %+v", replies[0])
+	if replies[0].Text != "我是你的 AI 助手" || !replies[0].IsFinal || !replies[0].IsEnd {
+		t.Fatalf("unexpected final snapshot reply: %+v", replies[0])
 	}
-	if replies[1].Text != "你的 AI 助手" || !replies[1].IsFinal || !replies[1].IsEnd {
-		t.Fatalf("unexpected second delta: %+v", replies[1])
+}
+
+func TestAdapterChatPreservesCodeBlocksInStructuredContent(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "connect.challenge",
+			"payload": map[string]interface{}{
+				"nonce": "nonce-6",
+			},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "session-6",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-6",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "session.message",
+			"payload": map[string]interface{}{
+				"runId":      "run-6",
+				"sessionKey": "session-6",
+				"state":      "final",
+				"message": map[string]interface{}{
+					"role": "assistant",
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": "请执行下面命令：",
+						},
+						{
+							"type":     "code",
+							"language": "bash",
+							"code":     "openclaw gateway restart",
+						},
+						{
+							"type": "text",
+							"text": "执行后检查日志。",
+						},
+					},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write session.message event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	adapter := newTestAdapter(t, wsURL, "token-6")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "session-6",
+		Role:      "user",
+		Text:      "how to restart gateway",
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-6",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	expected := "请执行下面命令：\n\n```bash\nopenclaw gateway restart\n```\n\n执行后检查日志。"
+	if replies[0].Text != expected {
+		t.Fatalf("unexpected rich text reply: %#v", replies[0].Text)
+	}
+	if !replies[0].IsFinal || !replies[0].IsEnd || replies[0].FinishReason != "stop" {
+		t.Fatalf("unexpected final reply flags: %+v", replies[0])
+	}
+}
+
+func TestAdapterChatUsesFinalSnapshotWhenStructuredContentRewritesEarlierChunks(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "connect.challenge",
+			"payload": map[string]interface{}{
+				"nonce": "nonce-7",
+			},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "session-7",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-7",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		events := []map[string]interface{}{
+			{
+				"type":  "event",
+				"event": "session.message",
+				"payload": map[string]interface{}{
+					"runId":      "run-7",
+					"sessionKey": "session-7",
+					"state":      "streaming",
+					"message": map[string]interface{}{
+						"role": "assistant",
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": "1. `web_search` 失败了",
+							},
+						},
+					},
+				},
+			},
+			{
+				"type":  "event",
+				"event": "session.message",
+				"payload": map[string]interface{}{
+					"runId":      "run-7",
+					"sessionKey": "session-7",
+					"state":      "final",
+					"message": map[string]interface{}{
+						"role": "assistant",
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": "1. `web_search` 失败了（fetch failed）\n\n**你能做的：**",
+							},
+							{
+								"type":     "code",
+								"language": "bash",
+								"code":     "curl -o cat1.jpg \"https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=800\"",
+							},
+						},
+					},
+				},
+			},
+		}
+		for _, event := range events {
+			if err := conn.WriteJSON(event); err != nil {
+				t.Fatalf("write session.message event: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	adapter := newTestAdapter(t, wsURL, "token-7")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "session-7",
+		Role:      "user",
+		Text:      "show me download command",
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-7",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected collapsed final reply, got %d %s", len(replies), string(data))
+	}
+	expected := "1. `web_search` 失败了（fetch failed）\n\n**你能做的：**\n\n```bash\ncurl -o cat1.jpg \"https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=800\"\n```"
+	if replies[0].Text != expected {
+		t.Fatalf("unexpected rewritten final reply: %#v", replies[0].Text)
+	}
+	if !replies[0].IsFinal || !replies[0].IsEnd || replies[0].ChunkSeq != 1 {
+		t.Fatalf("unexpected final flags: %+v", replies[0])
 	}
 }
 
