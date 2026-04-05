@@ -1348,6 +1348,7 @@ func (a *Adapter) readTranscriptAssistantReply(openClawSessionID string) (string
 	var (
 		currentAssistantTexts       []string
 		currentAssistantAttachments []protocol.ChatAttachment
+		currentToolAttachments      []protocol.ChatAttachment
 		lastAssistantTimestamp      int64
 		lastAssistantStopReason     string
 		currentTurnStarted          bool
@@ -1375,6 +1376,7 @@ func (a *Adapter) readTranscriptAssistantReply(openClawSessionID string) (string
 			currentTurnStarted = true
 			currentAssistantTexts = nil
 			currentAssistantAttachments = nil
+			currentToolAttachments = nil
 			lastAssistantTimestamp = 0
 			lastAssistantStopReason = ""
 		case "assistant":
@@ -1392,11 +1394,54 @@ func (a *Adapter) readTranscriptAssistantReply(openClawSessionID string) (string
 			currentAssistantAttachments = deduplicateAttachments(currentAssistantAttachments)
 			lastAssistantTimestamp = entryTimestamp
 			lastAssistantStopReason = strings.ToLower(strings.TrimSpace(firstString(message, "stopReason", "stop_reason")))
+		case "toolresult":
+			if !currentTurnStarted {
+				continue
+			}
+			currentToolAttachments = append(currentToolAttachments, extractTranscriptToolAttachments(message)...)
+			currentToolAttachments = deduplicateAttachments(currentToolAttachments)
 		}
 	}
 
 	complete := lastAssistantTimestamp > 0 && lastAssistantStopReason != "tooluse" && lastAssistantStopReason != "tool_use"
-	return joinMarkdownBlocks(currentAssistantTexts), currentAssistantAttachments, lastAssistantTimestamp, complete, nil
+	return joinMarkdownBlocks(currentAssistantTexts),
+		preferredTranscriptAttachments(currentToolAttachments, currentAssistantAttachments),
+		lastAssistantTimestamp,
+		complete,
+		nil
+}
+
+func extractTranscriptToolAttachments(message map[string]interface{}) []protocol.ChatAttachment {
+	if len(message) == 0 {
+		return nil
+	}
+	results := make([]protocol.ChatAttachment, 0, 2)
+	if details, ok := message["details"].(map[string]interface{}); ok {
+		results = append(results, extractMediaAttachments(details, "")...)
+		if media, ok := details["media"].(map[string]interface{}); ok {
+			results = append(results, extractMediaAttachments(media, "")...)
+		}
+	}
+	results = append(results, extractMediaAttachments(message, "")...)
+	return deduplicateAttachments(results)
+}
+
+func preferredTranscriptAttachments(toolAttachments, assistantAttachments []protocol.ChatAttachment) []protocol.ChatAttachment {
+	toolAttachments = deduplicateAttachments(toolAttachments)
+	assistantAttachments = deduplicateAttachments(assistantAttachments)
+	if hasLocalAttachment(toolAttachments) {
+		return toolAttachments
+	}
+	return deduplicateAttachments(append(toolAttachments, assistantAttachments...))
+}
+
+func hasLocalAttachment(items []protocol.ChatAttachment) bool {
+	for _, item := range items {
+		if strings.TrimSpace(item.LocalPath) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func transcriptEntryTimestampMillis(entry map[string]interface{}, message map[string]interface{}) int64 {

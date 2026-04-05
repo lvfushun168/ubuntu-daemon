@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -1928,6 +1929,60 @@ func TestAdapterChatWaitsForFollowUpAssistantAfterToolUseTranscript(t *testing.T
 	}
 	if !replies[1].IsFinal || !replies[1].IsEnd || replies[1].FinishReason != "stop" {
 		t.Fatalf("unexpected final flags: %+v", replies[1])
+	}
+}
+
+func TestReadTranscriptAssistantReplyPrefersToolResultLocalPathOverMarkdownURL(t *testing.T) {
+	tmpDir := t.TempDir()
+	transcriptDir := filepath.Join(tmpDir, "agents", "main", "sessions")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	localImagePath := filepath.Join(tmpDir, "media", "tool-image-generation", "cat_with_hat.png")
+	if err := os.MkdirAll(filepath.Dir(localImagePath), 0o755); err != nil {
+		t.Fatalf("mkdir media dir: %v", err)
+	}
+	if err := os.WriteFile(localImagePath, []byte("fake-image"), 0o600); err != nil {
+		t.Fatalf("write media file: %v", err)
+	}
+	transcript := strings.Join([]string{
+		`{"type":"message","message":{"role":"user","timestamp":2000,"content":[{"type":"text","text":"画一只戴帽子的猫"}]}}`,
+		fmt.Sprintf(`{"type":"message","message":{"role":"toolResult","details":{"media":{"mediaUrls":["%s"]},"paths":["%s"]}}}`, localImagePath, localImagePath),
+		`{"type":"message","message":{"role":"assistant","timestamp":2300,"content":[{"type":"text","text":"完成啦！\n\n![戴帽子的猫](https://filecdn-images.xingyeai.com/tool/edit_images/image_0_996348dbec6b46c3b06f6a8d5a5f7cb3.jpg)"}],"stopReason":"stop"}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(transcriptDir, "session-local-tool.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	cfg := &config.Config{
+		DeviceID:      "device-1",
+		DaemonVersion: "0.1.0",
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
+		OpenClaw: config.OpenClawConfig{
+			WorkDir:            tmpDir,
+			EnvFile:            filepath.Join(tmpDir, ".env"),
+			GatewayTokenEnvKey: "OPENCLAW_GATEWAY_TOKEN",
+		},
+	}
+	adapter := NewAdapter(cfg, log.New(os.Stdout, "", 0), store.NewFileStore(cfg.Store.StateFile))
+
+	text, attachments, _, complete, err := adapter.readTranscriptAssistantReply("session-local-tool")
+	if err != nil {
+		t.Fatalf("read transcript assistant reply failed: %v", err)
+	}
+	if !strings.Contains(text, "完成啦！") || !complete {
+		t.Fatalf("unexpected transcript text/complete: text=%q complete=%v", text, complete)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("expected 1 preferred attachment, got %+v", attachments)
+	}
+	if attachments[0].LocalPath != localImagePath {
+		t.Fatalf("expected local attachment path, got %+v", attachments[0])
+	}
+	if attachments[0].PreviewURL != "" {
+		t.Fatalf("expected markdown url to be ignored when local tool result exists, got %+v", attachments[0])
 	}
 }
 
