@@ -644,6 +644,7 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			replies[last].FinishReason = finishReason(payloadMap)
 			attachments = a.uploadLocalAttachments(ctx, sessionID, cloudMsgID, attachments)
 			if len(attachments) > 0 {
+				replies[last].Text = rewriteMarkdownImageURLs(replies[last].Text, attachments)
 				replies[last].Attachments = attachments
 			}
 			if strings.TrimSpace(replies[last].Text) == "" &&
@@ -1548,6 +1549,38 @@ func extractMarkdownImageRefs(text string) []string {
 		}
 	}
 	return results
+}
+
+func rewriteMarkdownImageURLs(text string, attachments []protocol.ChatAttachment) string {
+	if strings.TrimSpace(text) == "" || len(attachments) == 0 {
+		return text
+	}
+	replacementURLs := make([]string, 0, len(attachments))
+	for _, item := range attachments {
+		if strings.TrimSpace(item.PreviewURL) == "" {
+			continue
+		}
+		if normalizeMediaType(item.MediaType) != "image" {
+			continue
+		}
+		replacementURLs = append(replacementURLs, strings.TrimSpace(item.PreviewURL))
+	}
+	if len(replacementURLs) == 0 {
+		return text
+	}
+	index := 0
+	return markdownImagePattern.ReplaceAllStringFunc(text, func(match string) string {
+		if index >= len(replacementURLs) {
+			return match
+		}
+		groups := markdownImagePattern.FindStringSubmatch(match)
+		if len(groups) < 2 {
+			return match
+		}
+		replaced := strings.Replace(match, groups[1], replacementURLs[index], 1)
+		index++
+		return replaced
+	})
 }
 
 func extractMediaRefsFromPayload(payload map[string]interface{}) []string {

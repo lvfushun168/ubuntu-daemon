@@ -1986,6 +1986,23 @@ func TestReadTranscriptAssistantReplyPrefersToolResultLocalPathOverMarkdownURL(t
 	}
 }
 
+func TestRewriteMarkdownImageURLsUsesUploadedPreviewURL(t *testing.T) {
+	text := "完成啦！\n\n![看电视的猫](https://filecdn-images.xingyeai.com/tool/edit_images/image_0_996348dbec6b46c3b06f6a8d5a5f7cb3.jpg)\n"
+	attachments := []protocol.ChatAttachment{
+		{
+			MediaType:  "image",
+			PreviewURL: "https://clawos-1418965244.cos.ap-chengdu.myqcloud.com/202604/test.png",
+		},
+	}
+	rewritten := rewriteMarkdownImageURLs(text, attachments)
+	if !strings.Contains(rewritten, "https://clawos-1418965244.cos.ap-chengdu.myqcloud.com/202604/test.png") {
+		t.Fatalf("expected markdown url to be replaced, got %q", rewritten)
+	}
+	if strings.Contains(rewritten, "filecdn-images.xingyeai.com") {
+		t.Fatalf("expected old filecdn url to be removed, got %q", rewritten)
+	}
+}
+
 func TestAdapterChatIgnoresStaleSnapshotWithoutRunIdAndFallsBackToTranscript(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
