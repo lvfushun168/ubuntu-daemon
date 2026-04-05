@@ -153,6 +153,9 @@ func (m *ConfigManager) ensureJSONConfig(openClawCfg config.OpenClawConfig, valu
 		defaults := ensureMap(agents, "defaults")
 		model := ensureMap(defaults, "model")
 		model["primary"] = provider
+		if err := applyProviderConfig(current, strings.TrimSpace(provider), values); err != nil {
+			return err
+		}
 	}
 
 	data, err := json.MarshalIndent(current, "", "  ")
@@ -214,11 +217,54 @@ func (m *ConfigManager) updateDaemonCloudWSURL(values map[string]string) error {
 
 func isDaemonOnlyConfigKey(key string) bool {
 	switch key {
-	case "CLOUD_WS_URL", "EDGE_GATEWAY_WS_URL":
+	case "CLOUD_WS_URL", "EDGE_GATEWAY_WS_URL", "PROVIDER_API_KEY_ENV", "PROVIDER_BASE_URL":
 		return true
 	default:
 		return false
 	}
+}
+
+func applyProviderConfig(current map[string]interface{}, modelRef string, values map[string]string) error {
+	providerID, modelID, ok := splitModelRef(modelRef)
+	if !ok {
+		return nil
+	}
+
+	baseURL := strings.TrimSpace(values["PROVIDER_BASE_URL"])
+	apiKeyEnv := strings.TrimSpace(values["PROVIDER_API_KEY_ENV"])
+	if baseURL == "" && apiKeyEnv == "" {
+		return nil
+	}
+
+	models := ensureMap(current, "models")
+	if _, ok := models["mode"]; !ok {
+		models["mode"] = "merge"
+	}
+	providers := ensureMap(models, "providers")
+	providerCfg := ensureMap(providers, providerID)
+	providerCfg["api"] = "openai-completions"
+	if baseURL != "" {
+		providerCfg["baseUrl"] = baseURL
+	}
+	if apiKeyEnv != "" {
+		providerCfg["apiKey"] = "${" + apiKeyEnv + "}"
+	}
+	providerCfg["models"] = []interface{}{
+		map[string]interface{}{
+			"id":    modelID,
+			"name":  modelID,
+			"input": []interface{}{"text"},
+		},
+	}
+	return nil
+}
+
+func splitModelRef(modelRef string) (string, string, bool) {
+	parts := strings.SplitN(strings.TrimSpace(modelRef), "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
 func failedAck(version int64, daemonVersion, code string, err error) protocol.SysConfigAckPayload {

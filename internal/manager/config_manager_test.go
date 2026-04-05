@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,10 @@ func TestApplyWritesEnvAndState(t *testing.T) {
 		Config: map[string]string{
 			"API_KEY":                "sk-test",
 			"OPENCLAW_GATEWAY_TOKEN": "token-1",
+			"LLM_MODEL":              "moonshot/kimi-k2.5",
+			"PROVIDER_API_KEY_ENV":   "MOONSHOT_API_KEY",
+			"PROVIDER_BASE_URL":      "https://api.moonshot.cn/v1",
+			"MOONSHOT_API_KEY":       "provider-key",
 		},
 	}, "0.1.0")
 
@@ -65,6 +70,33 @@ func TestApplyWritesEnvAndState(t *testing.T) {
 	}
 	if !strings.Contains(content, "OPENCLAW_GATEWAY_TOKEN='token-1'") {
 		t.Fatalf("env file missing gateway token: %s", content)
+	}
+	if strings.Contains(content, "PROVIDER_API_KEY_ENV") {
+		t.Fatalf("daemon-only provider api key env should not be written to .env: %s", content)
+	}
+	if strings.Contains(content, "PROVIDER_BASE_URL") {
+		t.Fatalf("daemon-only provider base url should not be written to .env: %s", content)
+	}
+	if !strings.Contains(content, "MOONSHOT_API_KEY='provider-key'") {
+		t.Fatalf("env file missing provider api key: %s", content)
+	}
+
+	jsonData, err := os.ReadFile(filepath.Join(tmpDir, "openclaw.json"))
+	if err != nil {
+		t.Fatalf("read openclaw json: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(jsonData, &parsed); err != nil {
+		t.Fatalf("parse openclaw json: %v", err)
+	}
+	models := parsed["models"].(map[string]interface{})
+	providers := models["providers"].(map[string]interface{})
+	moonshot := providers["moonshot"].(map[string]interface{})
+	if moonshot["baseUrl"] != "https://api.moonshot.cn/v1" {
+		t.Fatalf("unexpected provider baseUrl: %+v", moonshot)
+	}
+	if moonshot["apiKey"] != "${MOONSHOT_API_KEY}" {
+		t.Fatalf("unexpected provider apiKey placeholder: %+v", moonshot)
 	}
 
 	state, err := store.NewFileStore(filepath.Join(tmpDir, "state.json")).Load()
