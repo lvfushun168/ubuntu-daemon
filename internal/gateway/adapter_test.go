@@ -1517,6 +1517,247 @@ func TestAdapterChatWaitsForTranscriptAssistantNewerThanCurrentUserMessage(t *te
 	}
 }
 
+func TestAdapterChatIgnoresAgentToolCompletionBeforeFinalAssistantReply(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "event",
+			"event":   "connect.challenge",
+			"payload": map[string]interface{}{"nonce": "nonce-agent-tool"},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-agent-tool",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		events := []map[string]interface{}{
+			{
+				"type":  "event",
+				"event": "chat",
+				"payload": map[string]interface{}{
+					"runId":      "run-agent-tool",
+					"sessionKey": "agent:main:cloud-session-agent-tool",
+					"stream":     "assistant",
+					"delta":      "好的，我来创作一幅正在喝茶的猫。",
+				},
+			},
+			{
+				"type":  "event",
+				"event": "agent",
+				"payload": map[string]interface{}{
+					"runId":      "run-agent-tool",
+					"sessionKey": "agent:main:cloud-session-agent-tool",
+					"stream":     "tool",
+					"status":     "completed",
+					"toolName":   "image_generate",
+					"mediaUrl":   "https://example.com/cat-drinking-tea.png",
+				},
+			},
+			{
+				"type":  "event",
+				"event": "session.message",
+				"payload": map[string]interface{}{
+					"runId":      "run-agent-tool",
+					"sessionKey": "agent:main:cloud-session-agent-tool",
+					"state":      "final",
+					"message": map[string]interface{}{
+						"role": "assistant",
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": "完成啦，这是正在喝茶的猫。",
+							},
+						},
+					},
+				},
+			},
+		}
+		for _, event := range events {
+			if err := conn.WriteJSON(event); err != nil {
+				t.Fatalf("write event: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	adapter := newTestAdapter(t, "ws"+strings.TrimPrefix(server.URL, "http"), "token-agent-tool")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "cloud-session-agent-tool",
+		Role:      "user",
+		Text:      "请创作一幅正在喝茶的猫",
+		Stream:    true,
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-agent-tool",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected collapsed final reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "完成啦，这是正在喝茶的猫。" {
+		t.Fatalf("unexpected final reply: %+v", replies[0])
+	}
+	if len(replies[0].Attachments) != 1 || replies[0].Attachments[0].PreviewURL != "https://example.com/cat-drinking-tea.png" {
+		t.Fatalf("expected attachment from tool event, got %+v", replies[0].Attachments)
+	}
+	if !replies[0].IsFinal || !replies[0].IsEnd || replies[0].FinishReason != "stop" {
+		t.Fatalf("unexpected final flags: %+v", replies[0])
+	}
+}
+
+func TestAdapterChatReturnsExplicitErrorInsteadOfEmptySuccessReply(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "event",
+			"event":   "connect.challenge",
+			"payload": map[string]interface{}{"nonce": "nonce-empty-final"},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-empty-final",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "chat",
+			"payload": map[string]interface{}{
+				"runId":      "run-empty-final",
+				"sessionKey": "agent:main:cloud-session-empty-final",
+				"state":      "final",
+			},
+		}); err != nil {
+			t.Fatalf("write terminal event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	adapter := newTestAdapter(t, "ws"+strings.TrimPrefix(server.URL, "http"), "token-empty-final")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "cloud-session-empty-final",
+		Role:      "user",
+		Text:      "hello",
+		Stream:    true,
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-empty-final",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "" {
+		t.Fatalf("expected empty text when reply is missing, got %+v", replies[0])
+	}
+	if replies[0].FinishReason != "error" || replies[0].ErrorCode != "ASSISTANT_REPLY_MISSING" {
+		t.Fatalf("expected explicit missing-reply error, got %+v", replies[0])
+	}
+}
+
 func TestAdapterChatIgnoresStaleSnapshotWithoutRunIdAndFallsBackToTranscript(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

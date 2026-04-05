@@ -548,7 +548,7 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 		attachments = append(attachments, extractMediaAttachments(payloadMap, attachmentText)...)
 		attachments = deduplicateAttachments(attachments)
 
-		if isTerminalChatEvent(payloadMap) {
+		if isTerminalChatEvent(event.Event, payloadMap) {
 			needTranscriptLookup := strings.TrimSpace(assembledText) == "" &&
 				(strings.TrimSpace(pendingSnapshotText) == "" || !pendingSnapshotVerified)
 			if needTranscriptLookup {
@@ -605,6 +605,13 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			attachments = a.uploadLocalAttachments(ctx, sessionID, cloudMsgID, attachments)
 			if len(attachments) > 0 {
 				replies[last].Attachments = attachments
+			}
+			if strings.TrimSpace(replies[last].Text) == "" &&
+				len(replies[last].Attachments) == 0 &&
+				replies[last].FinishReason == "stop" {
+				replies[last].FinishReason = "error"
+				replies[last].ErrorCode = "ASSISTANT_REPLY_MISSING"
+				replies[last].ErrorMessage = "assistant reply not available before resolve timeout"
 			}
 
 			if code := firstString(payloadMap, "errorCode", "code"); code != "" && replies[last].FinishReason == "error" {
@@ -1157,8 +1164,18 @@ func deepString(value interface{}) string {
 	return ""
 }
 
-func isTerminalChatEvent(payload map[string]interface{}) bool {
+func isTerminalChatEvent(eventName string, payload map[string]interface{}) bool {
+	eventName = strings.ToLower(strings.TrimSpace(eventName))
 	status := strings.ToLower(firstString(payload, "status", "phase", "state"))
+	if eventName == "agent" {
+		if stream := strings.ToLower(strings.TrimSpace(firstString(payload, "stream"))); stream == "lifecycle" {
+			switch strings.ToLower(strings.TrimSpace(firstString(payload, "event", "action"))) {
+			case "end", "error":
+				return true
+			}
+		}
+		return false
+	}
 	switch status {
 	case "done", "completed", "complete", "ok", "final", "stopped", "aborted", "cancelled", "canceled", "error", "failed":
 		return true
@@ -1246,7 +1263,11 @@ func (a *Adapter) loadTranscriptAssistantReply(ctx context.Context, openClawSess
 	if openClawSessionID == "" {
 		return "", nil, nil
 	}
-	deadline := time.Now().Add(8 * time.Second)
+	resolveTimeout := time.Duration(a.cfg.OpenClawConfig().ReplyResolveTimeoutSec) * time.Second
+	if resolveTimeout <= 0 {
+		resolveTimeout = 120 * time.Second
+	}
+	deadline := time.Now().Add(resolveTimeout)
 	for {
 		text, attachments, assistantTimestamp, err := a.readTranscriptAssistantReply(openClawSessionID)
 		if err != nil {
@@ -1254,6 +1275,9 @@ func (a *Adapter) loadTranscriptAssistantReply(ctx context.Context, openClawSess
 		}
 		if strings.TrimSpace(text) != "" && (minAssistantAfterMs <= 0 || assistantTimestamp > minAssistantAfterMs) {
 			return text, attachments, nil
+		}
+		if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+			deadline = ctxDeadline
 		}
 		if time.Now().After(deadline) {
 			return text, attachments, nil

@@ -36,16 +36,17 @@ type CloudConfig struct {
 }
 
 type OpenClawConfig struct {
-	WorkDir               string   `json:"work_dir"`
-	EnvFile               string   `json:"env_file"`
-	JSONConfigFile        string   `json:"json_config_file"`
-	GatewayWSURL          string   `json:"gateway_ws_url"`
-	GatewayHealthURL      string   `json:"gateway_health_url"`
-	GatewayTokenEnvKey    string   `json:"gateway_token_env_key"`
-	RestartCommand        string   `json:"restart_command"`
-	RestartArgs           []string `json:"restart_args"`
-	RestartTimeoutSec     int      `json:"restart_timeout_sec"`
-	HealthCheckTimeoutSec int      `json:"health_check_timeout_sec"`
+	WorkDir                string   `json:"work_dir"`
+	EnvFile                string   `json:"env_file"`
+	JSONConfigFile         string   `json:"json_config_file"`
+	GatewayWSURL           string   `json:"gateway_ws_url"`
+	GatewayHealthURL       string   `json:"gateway_health_url"`
+	GatewayTokenEnvKey     string   `json:"gateway_token_env_key"`
+	ReplyResolveTimeoutSec int      `json:"reply_resolve_timeout_sec"`
+	RestartCommand         string   `json:"restart_command"`
+	RestartArgs            []string `json:"restart_args"`
+	RestartTimeoutSec      int      `json:"restart_timeout_sec"`
+	HealthCheckTimeoutSec  int      `json:"health_check_timeout_sec"`
 }
 
 type RemoteCmdConfig struct {
@@ -102,16 +103,17 @@ func defaultConfig() *Config {
 			ReconnectMaxSec:   30,
 		},
 		OpenClaw: OpenClawConfig{
-			WorkDir:               "/root/.openclaw",
-			EnvFile:               "/root/.openclaw/.env",
-			JSONConfigFile:        "/root/.openclaw/openclaw.json",
-			GatewayWSURL:          "ws://127.0.0.1:18789",
-			GatewayHealthURL:      "http://127.0.0.1:18789/__openclaw__/canvas/",
-			GatewayTokenEnvKey:    "OPENCLAW_GATEWAY_TOKEN",
-			RestartCommand:        "pm2",
-			RestartArgs:           []string{"restart", "openclaw"},
-			RestartTimeoutSec:     20,
-			HealthCheckTimeoutSec: 5,
+			WorkDir:                "/root/.openclaw",
+			EnvFile:                "/root/.openclaw/.env",
+			JSONConfigFile:         "/root/.openclaw/openclaw.json",
+			GatewayWSURL:           "ws://127.0.0.1:18789",
+			GatewayHealthURL:       "http://127.0.0.1:18789/__openclaw__/canvas/",
+			GatewayTokenEnvKey:     "OPENCLAW_GATEWAY_TOKEN",
+			ReplyResolveTimeoutSec: 120,
+			RestartCommand:         "pm2",
+			RestartArgs:            []string{"restart", "openclaw"},
+			RestartTimeoutSec:      20,
+			HealthCheckTimeoutSec:  5,
 		},
 		Media: MediaConfig{
 			BackendBaseURL: "http://43.156.161.7:8080",
@@ -156,6 +158,9 @@ func (c *Config) normalize(path string) error {
 	}
 	if c.OpenClaw.RestartTimeoutSec <= 0 {
 		c.OpenClaw.RestartTimeoutSec = 20
+	}
+	if c.OpenClaw.ReplyResolveTimeoutSec <= 0 {
+		c.OpenClaw.ReplyResolveTimeoutSec = 120
 	}
 	if c.OpenClaw.HealthCheckTimeoutSec <= 0 {
 		c.OpenClaw.HealthCheckTimeoutSec = 5
