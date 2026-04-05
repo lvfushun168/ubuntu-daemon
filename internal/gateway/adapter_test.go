@@ -551,6 +551,233 @@ func TestAdapterChatHandlesSessionMessageEvents(t *testing.T) {
 	}
 }
 
+func TestAdapterChatHandlesAgentAssistantEvents(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "connect.challenge",
+			"payload": map[string]interface{}{
+				"nonce": "nonce-agent-1",
+			},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "session-agent-1",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-agent-1",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		events := []map[string]interface{}{
+			{
+				"type":  "event",
+				"event": "agent",
+				"payload": map[string]interface{}{
+					"runId":      "run-agent-1",
+					"sessionKey": "session-agent-1",
+					"stream":     "assistant",
+					"delta": map[string]interface{}{
+						"text": "OK",
+					},
+				},
+			},
+			{
+				"type":  "event",
+				"event": "chat",
+				"payload": map[string]interface{}{
+					"runId":      "run-agent-1",
+					"sessionKey": "session-agent-1",
+					"state":      "final",
+				},
+			},
+		}
+		for _, event := range events {
+			if err := conn.WriteJSON(event); err != nil {
+				t.Fatalf("write event: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	adapter := newTestAdapter(t, wsURL, "token-agent-1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "session-agent-1",
+		Role:      "user",
+		Text:      "please reply ok",
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-agent-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "OK" || !replies[0].IsFinal || !replies[0].IsEnd {
+		t.Fatalf("unexpected agent reply: %+v", replies[0])
+	}
+}
+
+func TestAdapterChatMatchesPrefixedSessionKeyForAgentEvents(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "event",
+			"event":   "connect.challenge",
+			"payload": map[string]interface{}{"nonce": "nonce-agent-2"},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   connectReq["id"],
+			"ok":   true,
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId": "run-agent-2",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		events := []map[string]interface{}{
+			{
+				"type":  "event",
+				"event": "agent",
+				"payload": map[string]interface{}{
+					"sessionKey": "agent:main:session-agent-2",
+					"stream":     "assistant",
+					"delta":      "你好",
+				},
+			},
+			{
+				"type":  "event",
+				"event": "chat",
+				"payload": map[string]interface{}{
+					"runId":      "run-agent-2",
+					"sessionKey": "agent:main:session-agent-2",
+					"state":      "final",
+				},
+			},
+		}
+		for _, event := range events {
+			if err := conn.WriteJSON(event); err != nil {
+				t.Fatalf("write event: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	adapter := newTestAdapter(t, wsURL, "token-agent-2")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "session-agent-2",
+		Role:      "user",
+		Text:      "say hi",
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-agent-2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 || replies[0].Text != "你好" || !replies[0].IsFinal || !replies[0].IsEnd {
+		t.Fatalf("unexpected replies: %+v", replies)
+	}
+}
+
 func TestAdapterChatUsesFinalSnapshotForCumulativeSessionMessages(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -985,6 +1212,477 @@ func TestAdapterChatFailsWhenGatewayTokenMissing(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("expected missing token error, got %v", err)
+	}
+}
+
+func TestAdapterChatRecoversAssistantReplyFromTranscriptOnTerminalOnlyEvent(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "connect.challenge",
+			"payload": map[string]interface{}{
+				"nonce": "nonce-transcript",
+			},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "hello-ok",
+			"auth": map[string]interface{}{
+				"deviceToken": "device-token-transcript",
+			},
+		}); err != nil {
+			t.Fatalf("write hello-ok: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "cloud-session-1",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-transcript",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "chat",
+			"payload": map[string]interface{}{
+				"runId":      "run-transcript",
+				"sessionKey": "agent:main:cloud-session-1",
+				"sessionId":  "openclaw-session-1",
+				"message": map[string]interface{}{
+					"role":      "user",
+					"timestamp": float64(1000),
+				},
+				"state": "final",
+			},
+		}); err != nil {
+			t.Fatalf("write terminal event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("OPENCLAW_GATEWAY_TOKEN='token-transcript'\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	transcriptDir := filepath.Join(tmpDir, "agents", "main", "sessions")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	transcript := strings.Join([]string{
+		`{"type":"message","message":{"role":"user","timestamp":1000,"content":[{"type":"text","text":"请只回复OK"}]}}`,
+		`{"type":"message","message":{"role":"assistant","timestamp":1200,"content":[{"type":"thinking","thinking":"hidden"},{"type":"text","text":"OK"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(transcriptDir, "openclaw-session-1.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	cfg := &config.Config{
+		DeviceID:      "device-1",
+		DaemonVersion: "0.1.0",
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
+		OpenClaw: config.OpenClawConfig{
+			WorkDir:            tmpDir,
+			EnvFile:            envPath,
+			GatewayWSURL:       "ws" + strings.TrimPrefix(server.URL, "http"),
+			GatewayTokenEnvKey: "OPENCLAW_GATEWAY_TOKEN",
+		},
+	}
+	adapter := NewAdapter(cfg, log.New(os.Stdout, "", 0), store.NewFileStore(cfg.Store.StateFile))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "cloud-session-1",
+		Role:      "user",
+		Text:      "请只回复OK",
+		Stream:    true,
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-transcript",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "OK" {
+		t.Fatalf("unexpected transcript reply: %+v", replies[0])
+	}
+	if !replies[0].IsFinal || !replies[0].IsEnd || replies[0].FinishReason != "stop" {
+		t.Fatalf("unexpected final flags: %+v", replies[0])
+	}
+}
+
+func TestAdapterChatWaitsForTranscriptAssistantNewerThanCurrentUserMessage(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "event",
+			"event":   "connect.challenge",
+			"payload": map[string]interface{}{"nonce": "nonce-transcript-delay"},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "hello-ok",
+			"auth": map[string]interface{}{"deviceToken": "device-token-delay"},
+		}); err != nil {
+			t.Fatalf("write hello-ok: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "cloud-session-delay",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-delay",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "chat",
+			"payload": map[string]interface{}{
+				"runId":      "run-delay",
+				"sessionKey": "agent:main:cloud-session-delay",
+				"sessionId":  "openclaw-session-delay",
+				"message": map[string]interface{}{
+					"role":      "user",
+					"timestamp": float64(2000),
+				},
+				"state": "final",
+			},
+		}); err != nil {
+			t.Fatalf("write terminal event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("OPENCLAW_GATEWAY_TOKEN='token-transcript-delay'\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	transcriptDir := filepath.Join(tmpDir, "agents", "main", "sessions")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	transcriptPath := filepath.Join(transcriptDir, "openclaw-session-delay.jsonl")
+	initialTranscript := strings.Join([]string{
+		`{"type":"message","message":{"role":"user","timestamp":1000,"content":[{"type":"text","text":"上一轮"}]}}`,
+		`{"type":"message","message":{"role":"assistant","timestamp":1500,"content":[{"type":"text","text":"旧回复"}]}}`,
+		`{"type":"message","message":{"role":"user","timestamp":2000,"content":[{"type":"text","text":"当前轮"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(transcriptPath, []byte(initialTranscript), 0o600); err != nil {
+		t.Fatalf("write initial transcript: %v", err)
+	}
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		updatedTranscript := initialTranscript + "\n" +
+			`{"type":"message","message":{"role":"assistant","timestamp":2300,"content":[{"type":"text","text":"新回复"}]}}`
+		_ = os.WriteFile(transcriptPath, []byte(updatedTranscript), 0o600)
+	}()
+
+	cfg := &config.Config{
+		DeviceID:      "device-1",
+		DaemonVersion: "0.1.0",
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
+		OpenClaw: config.OpenClawConfig{
+			WorkDir:            tmpDir,
+			EnvFile:            envPath,
+			GatewayWSURL:       "ws" + strings.TrimPrefix(server.URL, "http"),
+			GatewayTokenEnvKey: "OPENCLAW_GATEWAY_TOKEN",
+		},
+	}
+	adapter := NewAdapter(cfg, log.New(os.Stdout, "", 0), store.NewFileStore(cfg.Store.StateFile))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "cloud-session-delay",
+		Role:      "user",
+		Text:      "当前轮",
+		Stream:    true,
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-transcript-delay",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "新回复" {
+		t.Fatalf("unexpected delayed transcript reply: %+v", replies[0])
+	}
+}
+
+func TestAdapterChatIgnoresStaleSnapshotWithoutRunIdAndFallsBackToTranscript(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "event",
+			"event":   "connect.challenge",
+			"payload": map[string]interface{}{"nonce": "nonce-stale-snapshot"},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-stale-snapshot",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		events := []map[string]interface{}{
+			{
+				"type":  "event",
+				"event": "session.message",
+				"payload": map[string]interface{}{
+					"sessionKey": "agent:main:cloud-session-stale",
+					"sessionId":  "openclaw-session-stale",
+					"state":      "final",
+					"message": map[string]interface{}{
+						"role":      "assistant",
+						"timestamp": float64(1500),
+						"content": []map[string]interface{}{
+							{
+								"type": "text",
+								"text": "旧回复",
+							},
+						},
+					},
+				},
+			},
+			{
+				"type":  "event",
+				"event": "chat",
+				"payload": map[string]interface{}{
+					"runId":      "run-stale-snapshot",
+					"sessionKey": "agent:main:cloud-session-stale",
+					"sessionId":  "openclaw-session-stale",
+					"message": map[string]interface{}{
+						"role":      "user",
+						"timestamp": float64(2000),
+					},
+					"state": "final",
+				},
+			},
+		}
+		for _, event := range events {
+			if err := conn.WriteJSON(event); err != nil {
+				t.Fatalf("write event: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("OPENCLAW_GATEWAY_TOKEN='token-stale-snapshot'\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	transcriptDir := filepath.Join(tmpDir, "agents", "main", "sessions")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	transcriptPath := filepath.Join(transcriptDir, "openclaw-session-stale.jsonl")
+	initialTranscript := strings.Join([]string{
+		`{"type":"message","message":{"role":"user","timestamp":1000,"content":[{"type":"text","text":"上一轮"}]}}`,
+		`{"type":"message","message":{"role":"assistant","timestamp":1500,"content":[{"type":"text","text":"旧回复"}]}}`,
+		`{"type":"message","message":{"role":"user","timestamp":2000,"content":[{"type":"text","text":"当前轮"}]}}`,
+	}, "\n")
+	if err := os.WriteFile(transcriptPath, []byte(initialTranscript), 0o600); err != nil {
+		t.Fatalf("write initial transcript: %v", err)
+	}
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		updatedTranscript := initialTranscript + "\n" +
+			`{"type":"message","message":{"role":"assistant","timestamp":2400,"content":[{"type":"text","text":"当前轮新回复"}]}}`
+		_ = os.WriteFile(transcriptPath, []byte(updatedTranscript), 0o600)
+	}()
+
+	cfg := &config.Config{
+		DeviceID:      "device-1",
+		DaemonVersion: "0.1.0",
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
+		OpenClaw: config.OpenClawConfig{
+			WorkDir:            tmpDir,
+			EnvFile:            envPath,
+			GatewayWSURL:       "ws" + strings.TrimPrefix(server.URL, "http"),
+			GatewayTokenEnvKey: "OPENCLAW_GATEWAY_TOKEN",
+		},
+	}
+	adapter := NewAdapter(cfg, log.New(os.Stdout, "", 0), store.NewFileStore(cfg.Store.StateFile))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "cloud-session-stale",
+		Role:      "user",
+		Text:      "当前轮",
+		Stream:    true,
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-stale-snapshot",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 1 reply, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "当前轮新回复" {
+		t.Fatalf("unexpected transcript-backed reply: %+v", replies[0])
+	}
+	if replies[0].RequestMsgID != "msg-stale-snapshot" || replies[0].RunID != "run-stale-snapshot" {
+		t.Fatalf("missing correlation fields: %+v", replies[0])
 	}
 }
 

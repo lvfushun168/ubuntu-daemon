@@ -63,6 +63,8 @@ type ChatMessagePayload struct {
 }
 
 type ChatReplyPayload struct {
+	RequestMsgID string           `json:"request_msg_id,omitempty"`
+	RunID        string           `json:"run_id,omitempty"`
 	SessionID    string           `json:"session_id"`
 	Role         string           `json:"role"`
 	Text         string           `json:"text"`

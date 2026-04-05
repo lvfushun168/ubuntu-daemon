@@ -168,6 +168,8 @@ func (a *Adapter) Chat(ctx context.Context, payload protocol.ChatMessagePayload)
 	}
 	if len(replies) == 0 {
 		return []protocol.ChatReplyPayload{{
+			RequestMsgID: cloudMsgID,
+			RunID:        runID,
 			Role:         "assistant",
 			ChunkSeq:     1,
 			IsFinal:      true,
@@ -373,7 +375,7 @@ func (a *Adapter) handleControlFrame(frameRaw []byte) bool {
 		a.persistHelloOK(hello)
 		return true
 	case "event":
-		if envelope.Event == "chat" || envelope.Event == "session.message" {
+		if envelope.Event == "chat" || envelope.Event == "session.message" || envelope.Event == "agent" {
 			return false
 		}
 		a.logger.Printf("ignoring control event after connect type=%s event=%s", envelope.Type, envelope.Event)
@@ -453,6 +455,10 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 	assembledText := ""
 	pendingSnapshotText := ""
 	attachments := make([]protocol.ChatAttachment, 0, 2)
+	lastMatchedEvent := ""
+	openClawSessionID := ""
+	transcriptMinAssistantAfterMs := int64(0)
+	pendingSnapshotVerified := false
 
 	for {
 		frameRaw, err := a.readJSON(ctx, conn)
@@ -480,7 +486,7 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 		if err := json.Unmarshal(frameRaw, &event); err != nil {
 			continue
 		}
-		if event.Event != "chat" && event.Event != "session.message" {
+		if event.Event != "chat" && event.Event != "session.message" && event.Event != "agent" {
 			continue
 		}
 
@@ -490,8 +496,22 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 				continue
 			}
 		}
+		if event.Event == "agent" {
+			if encoded, err := json.Marshal(payloadMap); err == nil {
+				a.logger.Printf("raw agent event payload=%s", string(encoded))
+			} else {
+				a.logger.Printf("raw agent event payload_keys=%v", mapKeys(payloadMap))
+			}
+		}
 		if !matchesChatEvent(payloadMap, sessionID, runID) {
 			continue
+		}
+		lastMatchedEvent = event.Event
+		if transcriptSessionID := extractTranscriptSessionID(payloadMap, sessionID); transcriptSessionID != "" {
+			openClawSessionID = transcriptSessionID
+		}
+		if candidate := extractTranscriptMinAssistantAfterMs(payloadMap); candidate > transcriptMinAssistantAfterMs {
+			transcriptMinAssistantAfterMs = candidate
 		}
 
 		text, textMode := extractChatText(payloadMap)
@@ -501,13 +521,24 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			if deltaText != "" {
 				chunkSeq++
 				replies = append(replies, protocol.ChatReplyPayload{
-					Role:     "assistant",
-					Text:     deltaText,
-					ChunkSeq: chunkSeq,
+					RequestMsgID: cloudMsgID,
+					RunID:        runID,
+					Role:         "assistant",
+					Text:         deltaText,
+					ChunkSeq:     chunkSeq,
 				})
 			}
 		} else if textMode == chatTextModeSnapshot {
-			pendingSnapshotText = strings.Trim(text, "\n")
+			snapshotText := strings.Trim(text, "\n")
+			if snapshotText != "" {
+				if snapshotBelongsToCurrentTurn(payloadMap, runID, transcriptMinAssistantAfterMs) {
+					pendingSnapshotText = snapshotText
+					pendingSnapshotVerified = true
+				} else {
+					a.logger.Printf("ignore unverified snapshot event=%s sessionID=%s runID=%s keys=%v",
+						event.Event, sessionID, runID, mapKeys(payloadMap))
+				}
+			}
 		}
 
 		attachmentText := assembledText
@@ -518,12 +549,39 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 		attachments = deduplicateAttachments(attachments)
 
 		if isTerminalChatEvent(payloadMap) {
+			needTranscriptLookup := strings.TrimSpace(assembledText) == "" &&
+				(strings.TrimSpace(pendingSnapshotText) == "" || !pendingSnapshotVerified)
+			if needTranscriptLookup {
+				transcriptText, transcriptAttachments, err := a.loadTranscriptAssistantReply(ctx, openClawSessionID, transcriptMinAssistantAfterMs)
+				if err != nil {
+					a.logger.Printf("load transcript assistant reply failed sessionID=%s openclawSessionID=%s err=%v",
+						sessionID, openClawSessionID, err)
+				} else if strings.TrimSpace(transcriptText) != "" {
+					pendingSnapshotText = transcriptText
+					pendingSnapshotVerified = true
+					attachments = append(attachments, transcriptAttachments...)
+					attachments = deduplicateAttachments(attachments)
+					a.logger.Printf("recovered assistant reply from transcript sessionID=%s openclawSessionID=%s",
+						sessionID, openClawSessionID)
+				}
+			}
+			if strings.TrimSpace(assembledText) == "" && strings.TrimSpace(pendingSnapshotText) == "" {
+				if encoded, err := json.Marshal(payloadMap); err == nil {
+					a.logger.Printf("terminal chat event without extracted text event=%s sessionID=%s runID=%s payload=%s",
+						lastMatchedEvent, sessionID, runID, string(encoded))
+				} else {
+					a.logger.Printf("terminal chat event without extracted text event=%s sessionID=%s runID=%s payload_keys=%v",
+						lastMatchedEvent, sessionID, runID, mapKeys(payloadMap))
+				}
+			}
 			if pendingSnapshotText != "" {
 				replies = []protocol.ChatReplyPayload{
 					{
-						Role:     "assistant",
-						Text:     pendingSnapshotText,
-						ChunkSeq: 1,
+						RequestMsgID: cloudMsgID,
+						RunID:        runID,
+						Role:         "assistant",
+						Text:         pendingSnapshotText,
+						ChunkSeq:     1,
 					},
 				}
 				chunkSeq = 1
@@ -532,9 +590,11 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			if len(replies) == 0 {
 				chunkSeq++
 				replies = append(replies, protocol.ChatReplyPayload{
-					Role:     "assistant",
-					Text:     "",
-					ChunkSeq: chunkSeq,
+					RequestMsgID: cloudMsgID,
+					RunID:        runID,
+					Role:         "assistant",
+					Text:         "",
+					ChunkSeq:     chunkSeq,
 				})
 			}
 
@@ -556,6 +616,27 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			return replies, nil
 		}
 	}
+}
+
+func snapshotBelongsToCurrentTurn(payload map[string]interface{}, runID string, userTimestampMs int64) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	if runID != "" && anyStringEquals(payload, runID, "runId", "run_id") {
+		return true
+	}
+	if userTimestampMs <= 0 {
+		return false
+	}
+	message, ok := payload["message"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	role := strings.ToLower(strings.TrimSpace(firstString(message, "role")))
+	if role != "" && role != "assistant" {
+		return false
+	}
+	return timestampMillis(message["timestamp"]) > userTimestampMs
 }
 
 func (a *Adapter) loadGatewayToken() (string, error) {
@@ -791,7 +872,7 @@ func matchesChatEvent(payload map[string]interface{}, sessionID, runID string) b
 	if runID != "" && anyStringEquals(payload, runID, "runId", "run_id") {
 		return true
 	}
-	if sessionID != "" && anyStringEquals(payload, sessionID, "sessionKey", "sessionId", "session_id") {
+	if sessionID != "" && anySessionMatches(payload, sessionID, "sessionKey", "sessionId", "session_id") {
 		return true
 	}
 	return runID == "" && sessionID == ""
@@ -806,6 +887,79 @@ func anyStringEquals(values map[string]interface{}, target string, keys ...strin
 	return false
 }
 
+func anySessionMatches(values map[string]interface{}, target string, keys ...string) bool {
+	for _, key := range keys {
+		text, ok := values[key].(string)
+		if !ok {
+			continue
+		}
+		if sessionIdentifierMatches(strings.TrimSpace(text), target) {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionIdentifierMatches(candidate, target string) bool {
+	candidate = strings.TrimSpace(candidate)
+	target = strings.TrimSpace(target)
+	if candidate == "" || target == "" {
+		return false
+	}
+	if candidate == target {
+		return true
+	}
+	return strings.HasSuffix(candidate, ":"+target)
+}
+
+func extractTranscriptSessionID(payload map[string]interface{}, cloudSessionID string) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	for _, key := range []string{"sessionId", "session_id"} {
+		if candidate, ok := payload[key].(string); ok {
+			candidate = strings.TrimSpace(candidate)
+			if candidate != "" && !sessionIdentifierMatches(candidate, cloudSessionID) {
+				return candidate
+			}
+		}
+	}
+	for _, key := range []string{"session", "payload", "data"} {
+		nested, ok := payload[key].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if candidate := extractTranscriptSessionID(nested, cloudSessionID); candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func extractTranscriptMinAssistantAfterMs(payload map[string]interface{}) int64 {
+	if len(payload) == 0 {
+		return 0
+	}
+	if message, ok := payload["message"].(map[string]interface{}); ok {
+		role := strings.ToLower(strings.TrimSpace(firstString(message, "role")))
+		if role == "user" {
+			if ts := timestampMillis(message["timestamp"]); ts > 0 {
+				return ts
+			}
+		}
+	}
+	for _, key := range []string{"payload", "data", "session"} {
+		nested, ok := payload[key].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if ts := extractTranscriptMinAssistantAfterMs(nested); ts > 0 {
+			return ts
+		}
+	}
+	return 0
+}
+
 type chatTextMode string
 
 const (
@@ -818,8 +972,26 @@ func extractChatText(payload map[string]interface{}) (string, chatTextMode) {
 	if len(payload) == 0 {
 		return "", chatTextModeNone
 	}
+	for _, key := range []string{"payload", "data"} {
+		if nested, ok := payload[key].(map[string]interface{}); ok {
+			if text, mode := extractChatText(nested); mode != chatTextModeNone {
+				return text, mode
+			}
+		}
+	}
 	if delta, ok := payload["delta"].(string); ok && delta != "" {
 		return delta, chatTextModeDelta
+	}
+	if stream := strings.ToLower(strings.TrimSpace(firstString(payload, "stream"))); stream == "assistant" {
+		if delta := deepString(payload["delta"]); delta != "" {
+			return delta, chatTextModeDelta
+		}
+		if text := deepString(payload["text"]); text != "" {
+			return text, chatTextModeSnapshot
+		}
+		if text := extractMarkdownBlocks(payload["content"]); text != "" {
+			return text, chatTextModeSnapshot
+		}
 	}
 	if text := extractAssistantMessageText(payload); text != "" {
 		return text, chatTextModeSnapshot
@@ -991,6 +1163,11 @@ func isTerminalChatEvent(payload map[string]interface{}) bool {
 	case "done", "completed", "complete", "ok", "final", "stopped", "aborted", "cancelled", "canceled", "error", "failed":
 		return true
 	}
+	if stream := strings.ToLower(strings.TrimSpace(firstString(payload, "stream"))); stream == "lifecycle" {
+		if event := strings.ToLower(strings.TrimSpace(firstString(payload, "event", "action"))); event == "end" || event == "error" {
+			return true
+		}
+	}
 	if value, ok := payload["isFinal"].(bool); ok && value {
 		return true
 	}
@@ -1002,6 +1179,14 @@ func isTerminalChatEvent(payload map[string]interface{}) bool {
 
 func finishReason(payload map[string]interface{}) string {
 	status := strings.ToLower(firstString(payload, "status", "phase", "state", "finishReason", "finish_reason"))
+	if stream := strings.ToLower(strings.TrimSpace(firstString(payload, "stream"))); stream == "lifecycle" {
+		switch strings.ToLower(strings.TrimSpace(firstString(payload, "event", "action"))) {
+		case "error":
+			return "error"
+		case "end":
+			return "stop"
+		}
+	}
 	switch status {
 	case "error", "failed":
 		return "error"
@@ -1032,6 +1217,14 @@ func firstNonEmptyString(values map[string]interface{}, keys ...string) string {
 	return ""
 }
 
+func mapKeys(values map[string]interface{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 func gatewayResponseError(prefix string, errPayload *gatewayError) error {
 	if errPayload == nil {
 		return errors.New(prefix)
@@ -1046,6 +1239,138 @@ func gatewayResponseError(prefix string, errPayload *gatewayError) error {
 		return fmt.Errorf("%s: %s", prefix, errPayload.Code)
 	}
 	return errors.New(prefix)
+}
+
+func (a *Adapter) loadTranscriptAssistantReply(ctx context.Context, openClawSessionID string, minAssistantAfterMs int64) (string, []protocol.ChatAttachment, error) {
+	openClawSessionID = strings.TrimSpace(openClawSessionID)
+	if openClawSessionID == "" {
+		return "", nil, nil
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		text, attachments, assistantTimestamp, err := a.readTranscriptAssistantReply(openClawSessionID)
+		if err != nil {
+			return "", nil, err
+		}
+		if strings.TrimSpace(text) != "" && (minAssistantAfterMs <= 0 || assistantTimestamp > minAssistantAfterMs) {
+			return text, attachments, nil
+		}
+		if time.Now().After(deadline) {
+			return text, attachments, nil
+		}
+		select {
+		case <-ctx.Done():
+			return text, attachments, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func (a *Adapter) readTranscriptAssistantReply(openClawSessionID string) (string, []protocol.ChatAttachment, int64, error) {
+	path := a.transcriptSessionPath(openClawSessionID)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil, 0, nil
+		}
+		return "", nil, 0, fmt.Errorf("read transcript %s: %w", path, err)
+	}
+	var (
+		lastAssistantText        string
+		lastAssistantAttachments []protocol.ChatAttachment
+		lastAssistantTimestamp   int64
+		awaitingAssistant        bool
+	)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var entry map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(firstString(entry, "type"))) != "message" {
+			continue
+		}
+		message, ok := entry["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		entryTimestamp := transcriptEntryTimestampMillis(entry, message)
+
+		switch role := strings.ToLower(strings.TrimSpace(firstString(message, "role"))); role {
+		case "user":
+			awaitingAssistant = true
+			lastAssistantText = ""
+			lastAssistantAttachments = nil
+			lastAssistantTimestamp = 0
+		case "assistant":
+			if !awaitingAssistant {
+				continue
+			}
+			text := strings.Trim(extractMarkdownBlocks(message["content"]), "\n")
+			if text == "" {
+				text = strings.Trim(firstNonEmptyString(message, "text", "value"), "\n")
+			}
+			lastAssistantText = text
+			lastAssistantAttachments = deduplicateAttachments(extractMediaAttachments(message, text))
+			lastAssistantTimestamp = entryTimestamp
+			awaitingAssistant = false
+		}
+	}
+
+	return lastAssistantText, lastAssistantAttachments, lastAssistantTimestamp, nil
+}
+
+func transcriptEntryTimestampMillis(entry map[string]interface{}, message map[string]interface{}) int64 {
+	if ts := timestampMillis(message["timestamp"]); ts > 0 {
+		return ts
+	}
+	if ts := timestampMillis(entry["timestamp"]); ts > 0 {
+		return ts
+	}
+	return 0
+}
+
+func timestampMillis(value interface{}) int64 {
+	switch v := value.(type) {
+	case int64:
+		return v
+	case int:
+		return int64(v)
+	case float64:
+		return int64(v)
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return n
+		}
+	case string:
+		text := strings.TrimSpace(v)
+		if text == "" {
+			return 0
+		}
+		if parsed, err := time.Parse(time.RFC3339Nano, text); err == nil {
+			return parsed.UnixMilli()
+		}
+	}
+	return 0
+}
+
+func (a *Adapter) transcriptSessionPath(openClawSessionID string) string {
+	openClawCfg := a.cfg.OpenClawConfig()
+	workDir := strings.TrimSpace(openClawCfg.WorkDir)
+	if workDir == "" {
+		switch {
+		case strings.TrimSpace(openClawCfg.JSONConfigFile) != "":
+			workDir = filepath.Dir(openClawCfg.JSONConfigFile)
+		case strings.TrimSpace(openClawCfg.EnvFile) != "":
+			workDir = filepath.Dir(openClawCfg.EnvFile)
+		default:
+			workDir = "."
+		}
+	}
+	return filepath.Join(workDir, "agents", "main", "sessions", openClawSessionID+".jsonl")
 }
 
 func extractMediaAttachments(payload map[string]interface{}, assembledText string) []protocol.ChatAttachment {

@@ -94,6 +94,7 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 	var payload protocol.ChatMessagePayload
 	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
 		r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
+			RequestMsgID: envelope.MsgID,
 			Role:         "assistant",
 			ChunkSeq:     1,
 			IsFinal:      true,
@@ -111,6 +112,7 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 	replies, err := r.gatewayAdapter.Chat(ctx, payload)
 	if err != nil {
 		r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
+			RequestMsgID: envelope.MsgID,
 			SessionID:    payload.SessionID,
 			Role:         "assistant",
 			ChunkSeq:     1,
@@ -123,6 +125,7 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 		return
 	}
 	for _, reply := range replies {
+		reply.RequestMsgID = envelope.MsgID
 		reply.SessionID = payload.SessionID
 		if reply.Role == "" {
 			reply.Role = "assistant"
