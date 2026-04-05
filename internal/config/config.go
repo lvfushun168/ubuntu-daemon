@@ -22,6 +22,7 @@ type Config struct {
 	Cloud                  CloudConfig     `json:"cloud"`
 	OpenClaw               OpenClawConfig  `json:"openclaw"`
 	Media                  MediaConfig     `json:"media"`
+	Video                  VideoConfig     `json:"video"`
 	RemoteCommand          RemoteCmdConfig `json:"remote_command"`
 	Store                  StoreConfig     `json:"store"`
 	ChatReplyOnUnsupported bool            `json:"chat_reply_on_unsupported"`
@@ -59,6 +60,22 @@ type RemoteCmdConfig struct {
 type MediaConfig struct {
 	BackendBaseURL string `json:"backend_base_url"`
 	UploadToken    string `json:"upload_token"`
+}
+
+type VideoConfig struct {
+	Enabled            bool   `json:"enabled"`
+	Provider           string `json:"provider"`
+	APIBaseURL         string `json:"api_base_url"`
+	CreateTimeoutSec   int    `json:"create_timeout_sec"`
+	QueryTimeoutSec    int    `json:"query_timeout_sec"`
+	PollIntervalSec    int    `json:"poll_interval_sec"`
+	TaskTimeoutSec     int    `json:"task_timeout_sec"`
+	DownloadTimeoutSec int    `json:"download_timeout_sec"`
+	TempDir            string `json:"temp_dir"`
+	DefaultModel       string `json:"default_model"`
+	DefaultDuration    int    `json:"default_duration"`
+	DefaultResolution  string `json:"default_resolution"`
+	PromptOptimizer    bool   `json:"prompt_optimizer"`
 }
 
 type StoreConfig struct {
@@ -119,6 +136,21 @@ func defaultConfig() *Config {
 			BackendBaseURL: "http://43.156.161.7:8080",
 			UploadToken:    "",
 		},
+		Video: VideoConfig{
+			Enabled:            false,
+			Provider:           "minimax",
+			APIBaseURL:         "https://api.minimaxi.com",
+			CreateTimeoutSec:   10,
+			QueryTimeoutSec:    10,
+			PollIntervalSec:    5,
+			TaskTimeoutSec:     180,
+			DownloadTimeoutSec: 120,
+			TempDir:            "/root/.openclaw/media/video-generation",
+			DefaultModel:       "MiniMax-Hailuo-2.3",
+			DefaultDuration:    6,
+			DefaultResolution:  "768P",
+			PromptOptimizer:    true,
+		},
 		RemoteCommand: RemoteCmdConfig{
 			DefaultTimeoutSec: 30,
 			MaxTimeoutSec:     300,
@@ -142,6 +174,7 @@ func (c *Config) normalize(path string) error {
 	c.OpenClaw.WorkDir = absPath(baseDir, c.OpenClaw.WorkDir)
 	c.OpenClaw.EnvFile = absPath(baseDir, c.OpenClaw.EnvFile)
 	c.OpenClaw.JSONConfigFile = absPath(baseDir, c.OpenClaw.JSONConfigFile)
+	c.Video.TempDir = absPath(baseDir, c.Video.TempDir)
 	c.Store.StateFile = absPath(baseDir, c.Store.StateFile)
 
 	if c.Cloud.ConnectTimeoutSec <= 0 {
@@ -174,6 +207,36 @@ func (c *Config) normalize(path string) error {
 	if c.RemoteCommand.MaxOutputBytes <= 0 {
 		c.RemoteCommand.MaxOutputBytes = 64 * 1024
 	}
+	if c.Video.Provider == "" {
+		c.Video.Provider = "minimax"
+	}
+	if c.Video.APIBaseURL == "" {
+		c.Video.APIBaseURL = "https://api.minimaxi.com"
+	}
+	if c.Video.CreateTimeoutSec <= 0 {
+		c.Video.CreateTimeoutSec = 10
+	}
+	if c.Video.QueryTimeoutSec <= 0 {
+		c.Video.QueryTimeoutSec = 10
+	}
+	if c.Video.PollIntervalSec <= 0 {
+		c.Video.PollIntervalSec = 5
+	}
+	if c.Video.TaskTimeoutSec <= 0 {
+		c.Video.TaskTimeoutSec = 180
+	}
+	if c.Video.DownloadTimeoutSec <= 0 {
+		c.Video.DownloadTimeoutSec = 120
+	}
+	if c.Video.DefaultModel == "" {
+		c.Video.DefaultModel = "MiniMax-Hailuo-2.3"
+	}
+	if c.Video.DefaultDuration <= 0 {
+		c.Video.DefaultDuration = 6
+	}
+	if c.Video.DefaultResolution == "" {
+		c.Video.DefaultResolution = "768P"
+	}
 	return nil
 }
 
@@ -181,6 +244,12 @@ func (c *Config) MediaConfig() MediaConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.Media
+}
+
+func (c *Config) VideoConfig() VideoConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.Video
 }
 
 func (c *Config) CloudWSURL() string {
@@ -289,6 +358,7 @@ func (c *Config) persist() error {
 		Cloud                  CloudConfig     `json:"cloud"`
 		OpenClaw               OpenClawConfig  `json:"openclaw"`
 		Media                  MediaConfig     `json:"media"`
+		Video                  VideoConfig     `json:"video"`
 		RemoteCommand          RemoteCmdConfig `json:"remote_command"`
 		Store                  StoreConfig     `json:"store"`
 		ChatReplyOnUnsupported bool            `json:"chat_reply_on_unsupported"`
@@ -298,6 +368,7 @@ func (c *Config) persist() error {
 		Cloud:                  c.Cloud,
 		OpenClaw:               c.OpenClaw,
 		Media:                  c.Media,
+		Video:                  c.Video,
 		RemoteCommand:          c.RemoteCommand,
 		Store:                  c.Store,
 		ChatReplyOnUnsupported: c.ChatReplyOnUnsupported,

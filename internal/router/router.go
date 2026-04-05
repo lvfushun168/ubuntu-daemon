@@ -6,7 +6,6 @@ import (
 	"log"
 	"time"
 
-	"openclaw/dameon/internal/gateway"
 	"openclaw/dameon/internal/manager"
 	"openclaw/dameon/internal/protocol"
 	"openclaw/dameon/internal/runner"
@@ -16,22 +15,34 @@ type Sender interface {
 	SendEnvelope(ctx context.Context, msgID, msgType string, payload interface{}) error
 }
 
+type ChatGateway interface {
+	Chat(ctx context.Context, payload protocol.ChatMessagePayload) ([]protocol.ChatReplyPayload, error)
+}
+
+type VideoService interface {
+	Enabled() bool
+	IsVideoRequest(text string) bool
+	Generate(ctx context.Context, requestMsgID string, payload protocol.ChatMessagePayload) ([]protocol.ChatReplyPayload, error)
+}
+
 type MessageRouter struct {
 	logger         *log.Logger
 	sender         Sender
 	configManager  *manager.ConfigManager
 	remoteRunner   *runner.RemoteCommandRunner
-	gatewayAdapter *gateway.Adapter
+	gatewayAdapter ChatGateway
+	videoService   VideoService
 	daemonVersion  string
 }
 
-func New(logger *log.Logger, sender Sender, configManager *manager.ConfigManager, remoteRunner *runner.RemoteCommandRunner, gatewayAdapter *gateway.Adapter, daemonVersion string) *MessageRouter {
+func New(logger *log.Logger, sender Sender, configManager *manager.ConfigManager, remoteRunner *runner.RemoteCommandRunner, gatewayAdapter ChatGateway, videoService VideoService, daemonVersion string) *MessageRouter {
 	return &MessageRouter{
 		logger:         logger,
 		sender:         sender,
 		configManager:  configManager,
 		remoteRunner:   remoteRunner,
 		gatewayAdapter: gatewayAdapter,
+		videoService:   videoService,
 		daemonVersion:  daemonVersion,
 	}
 }
@@ -109,6 +120,39 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 		payload.Metadata = map[string]interface{}{}
 	}
 	payload.Metadata["cloud_msg_id"] = envelope.MsgID
+
+	videoEnabled := r.videoService != nil && r.videoService.Enabled()
+	videoMatched := videoEnabled && r.videoService.IsVideoRequest(payload.Text)
+	r.logger.Printf("chat route decision msg_id=%s session_id=%s video_enabled=%t video_matched=%t text=%q",
+		envelope.MsgID, payload.SessionID, videoEnabled, videoMatched, payload.Text)
+
+	if videoMatched {
+		replies, err := r.videoService.Generate(ctx, envelope.MsgID, payload)
+		if err != nil {
+			r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
+				RequestMsgID: envelope.MsgID,
+				SessionID:    payload.SessionID,
+				Role:         "assistant",
+				ChunkSeq:     1,
+				IsFinal:      true,
+				IsEnd:        true,
+				FinishReason: "error",
+				ErrorCode:    "CHAT_EXECUTION_FAILED",
+				ErrorMessage: err.Error(),
+			})
+			return
+		}
+		for _, reply := range replies {
+			reply.RequestMsgID = envelope.MsgID
+			reply.SessionID = payload.SessionID
+			if reply.Role == "" {
+				reply.Role = "assistant"
+			}
+			r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, reply)
+		}
+		return
+	}
+
 	replies, err := r.gatewayAdapter.Chat(ctx, payload)
 	if err != nil {
 		r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{

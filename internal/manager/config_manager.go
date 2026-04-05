@@ -235,9 +235,6 @@ func applyCapabilityModels(defaults map[string]interface{}, values map[string]st
 	if imageGenerationModel := strings.TrimSpace(values["IMAGE_GENERATION_MODEL"]); imageGenerationModel != "" {
 		ensureMap(defaults, "imageGenerationModel")["primary"] = imageGenerationModel
 	}
-	if videoGenerationModel := strings.TrimSpace(values["VIDEO_GENERATION_MODEL"]); videoGenerationModel != "" {
-		ensureMap(defaults, "videoGenerationModel")["primary"] = videoGenerationModel
-	}
 	return nil
 }
 
@@ -302,7 +299,7 @@ func splitModelRef(modelRef string) (string, string, bool) {
 }
 
 func collectConfiguredModelRefs(values map[string]string) []string {
-	keys := []string{"CHAT_MODEL", "LLM_MODEL", "IMAGE_MODEL", "IMAGE_GENERATION_MODEL", "VIDEO_GENERATION_MODEL"}
+	keys := []string{"CHAT_MODEL", "LLM_MODEL", "IMAGE_MODEL", "IMAGE_GENERATION_MODEL"}
 	refs := make([]string, 0, len(keys))
 	for _, key := range keys {
 		value := strings.TrimSpace(values[key])

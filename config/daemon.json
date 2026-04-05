@@ -24,6 +24,21 @@
     "backend_base_url": "http://43.156.161.7:8080",
     "upload_token": "123456"
   },
+  "video": {
+    "enabled": false,
+    "provider": "minimax",
+    "api_base_url": "https://api.minimaxi.com",
+    "create_timeout_sec": 10,
+    "query_timeout_sec": 10,
+    "poll_interval_sec": 5,
+    "task_timeout_sec": 180,
+    "download_timeout_sec": 120,
+    "temp_dir": "/root/.openclaw/media/video-generation",
+    "default_model": "MiniMax-Hailuo-2.3",
+    "default_duration": 6,
+    "default_resolution": "768P",
+    "prompt_optimizer": true
+  },
   "remote_command": {
     "default_timeout_sec": 30,
     "max_timeout_sec": 300,

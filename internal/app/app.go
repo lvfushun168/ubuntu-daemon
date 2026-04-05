@@ -11,6 +11,7 @@ import (
 	"openclaw/dameon/internal/router"
 	"openclaw/dameon/internal/runner"
 	"openclaw/dameon/internal/store"
+	"openclaw/dameon/internal/video"
 )
 
 type App struct {
@@ -23,8 +24,9 @@ func New(cfg *config.Config, logger *log.Logger) (*App, error) {
 	configManager := manager.NewConfigManager(cfg, stateStore, execRunner)
 	remoteRunner := runner.NewRemoteCommandRunner(cfg.RemoteCommand, execRunner)
 	gatewayAdapter := gateway.NewAdapter(cfg, logger, stateStore)
+	videoService := video.NewService(cfg, logger, gatewayAdapter)
 
-	messageRouter := router.New(logger, nil, configManager, remoteRunner, gatewayAdapter, cfg.DaemonVersion)
+	messageRouter := router.New(logger, nil, configManager, remoteRunner, gatewayAdapter, videoService, cfg.DaemonVersion)
 	cloudClient := cloud.NewClient(cfg, logger, messageRouter)
 	messageRouter.SetSender(cloudClient)
 

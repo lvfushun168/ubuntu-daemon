@@ -1638,6 +1638,17 @@ func (a *Adapter) uploadLocalAttachments(ctx context.Context, sessionID, cloudMs
 	return attachments
 }
 
+func (a *Adapter) UploadLocalAttachment(ctx context.Context, sessionID, cloudMsgID string, attachment protocol.ChatAttachment) (protocol.ChatAttachment, error) {
+	item := attachment
+	if strings.TrimSpace(item.LocalPath) == "" {
+		return item, fmt.Errorf("local_path is required")
+	}
+	if err := a.uploadAttachmentFile(ctx, sessionID, cloudMsgID, &item); err != nil {
+		return attachment, err
+	}
+	return item, nil
+}
+
 func (a *Adapter) uploadAttachmentFile(ctx context.Context, sessionID, cloudMsgID string, item *protocol.ChatAttachment) error {
 	mediaCfg := a.cfg.MediaConfig()
 	backendBase := strings.TrimSpace(mediaCfg.BackendBaseURL)

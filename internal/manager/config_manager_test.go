@@ -113,8 +113,8 @@ func TestApplyWritesEnvAndState(t *testing.T) {
 	if defaults["imageGenerationModel"].(map[string]interface{})["primary"] != "minimax/image-01" {
 		t.Fatalf("unexpected imageGenerationModel defaults: %+v", defaults)
 	}
-	if defaults["videoGenerationModel"].(map[string]interface{})["primary"] != "minimax/video-01" {
-		t.Fatalf("unexpected videoGenerationModel defaults: %+v", defaults)
+	if _, exists := defaults["videoGenerationModel"]; exists {
+		t.Fatalf("videoGenerationModel must not be written into openclaw defaults: %+v", defaults)
 	}
 
 	state, err := store.NewFileStore(filepath.Join(tmpDir, "state.json")).Load()
