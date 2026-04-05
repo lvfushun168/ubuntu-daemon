@@ -1878,7 +1878,7 @@ func TestAdapterChatWaitsForFollowUpAssistantAfterToolUseTranscript(t *testing.T
 	go func() {
 		time.Sleep(150 * time.Millisecond)
 		updatedTranscript := initialTranscript + "\n" +
-			`{"type":"message","message":{"role":"assistant","timestamp":2300,"content":[{"type":"text","text":"完成啦！这是正在喝茶的猫。"}],"stopReason":"stop"}}`
+			`{"type":"message","message":{"role":"assistant","timestamp":2300,"content":[{"type":"text","text":"完成啦！这是正在喝茶的猫。\n\n![正在喝茶的猫](https://example.com/cat-drinking-tea.jpg)"}],"stopReason":"stop"}}`
 		_ = os.WriteFile(transcriptPath, []byte(updatedTranscript), 0o600)
 	}()
 
@@ -1922,6 +1922,9 @@ func TestAdapterChatWaitsForFollowUpAssistantAfterToolUseTranscript(t *testing.T
 	}
 	if !strings.Contains(replies[1].Text, "完成啦！这是正在喝茶的猫。") {
 		t.Fatalf("expected follow-up assistant delta, got %+v", replies[1])
+	}
+	if len(replies[1].Attachments) != 1 || replies[1].Attachments[0].PreviewURL != "https://example.com/cat-drinking-tea.jpg" {
+		t.Fatalf("expected transcript image attachment, got %+v", replies[1].Attachments)
 	}
 	if !replies[1].IsFinal || !replies[1].IsEnd || replies[1].FinishReason != "stop" {
 		t.Fatalf("unexpected final flags: %+v", replies[1])

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -34,6 +35,8 @@ const (
 	writeTimeout        = 5 * time.Second
 	readTimeout         = 90 * time.Second
 )
+
+var markdownImagePattern = regexp.MustCompile(`!\[[^\]]*\]\((https?://[^)\s]+)\)`)
 
 type Adapter struct {
 	cfg        *config.Config
@@ -1447,9 +1450,12 @@ func (a *Adapter) transcriptSessionPath(openClawSessionID string) string {
 }
 
 func extractMediaAttachments(payload map[string]interface{}, assembledText string) []protocol.ChatAttachment {
-	attachments := make([]protocol.ChatAttachment, 0, 2)
+	attachments := make([]protocol.ChatAttachment, 0, 4)
 	for _, line := range extractMediaLines(assembledText) {
 		attachments = append(attachments, mediaAttachmentFromRef(line))
+	}
+	for _, ref := range extractMarkdownImageRefs(assembledText) {
+		attachments = append(attachments, mediaAttachmentFromRef(ref))
 	}
 	for _, ref := range extractMediaRefsFromPayload(payload) {
 		attachments = append(attachments, mediaAttachmentFromRef(ref))
@@ -1473,6 +1479,27 @@ func extractMediaLines(text string) []string {
 			if ref != "" {
 				results = append(results, ref)
 			}
+		}
+	}
+	return results
+}
+
+func extractMarkdownImageRefs(text string) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	matches := markdownImagePattern.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	results := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		ref := strings.TrimSpace(match[1])
+		if ref != "" {
+			results = append(results, ref)
 		}
 	}
 	return results
