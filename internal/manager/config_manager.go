@@ -148,12 +148,16 @@ func (m *ConfigManager) ensureJSONConfig(openClawCfg config.OpenClawConfig, valu
 
 	// OpenClaw 2026.4.1 已不支持根级 default_model，默认模型需写入 agents.defaults.model.primary。
 	// 这里保持与现有配置结构兼容，避免写入未知字段导致 OpenClaw 启动失败。
-	if provider, ok := values["LLM_MODEL"]; ok && provider != "" {
+	chatModel := firstNonEmptyValue(values, "CHAT_MODEL", "LLM_MODEL")
+	if chatModel != "" {
 		agents := ensureMap(current, "agents")
 		defaults := ensureMap(agents, "defaults")
 		model := ensureMap(defaults, "model")
-		model["primary"] = provider
-		if err := applyProviderConfig(current, strings.TrimSpace(provider), values); err != nil {
+		model["primary"] = chatModel
+		if err := applyCapabilityModels(defaults, values); err != nil {
+			return err
+		}
+		if err := applyProviderConfig(current, values); err != nil {
 			return err
 		}
 	}
@@ -217,22 +221,35 @@ func (m *ConfigManager) updateDaemonCloudWSURL(values map[string]string) error {
 
 func isDaemonOnlyConfigKey(key string) bool {
 	switch key {
-	case "CLOUD_WS_URL", "EDGE_GATEWAY_WS_URL", "PROVIDER_API_KEY_ENV", "PROVIDER_BASE_URL":
+	case "CLOUD_WS_URL", "EDGE_GATEWAY_WS_URL", "PROVIDER_API_KEY_ENV", "PROVIDER_BASE_URL", "PROVIDER_API_TYPE":
 		return true
 	default:
 		return false
 	}
 }
 
-func applyProviderConfig(current map[string]interface{}, modelRef string, values map[string]string) error {
-	providerID, modelID, ok := splitModelRef(modelRef)
-	if !ok {
-		return nil
+func applyCapabilityModels(defaults map[string]interface{}, values map[string]string) error {
+	if imageModel := strings.TrimSpace(values["IMAGE_MODEL"]); imageModel != "" {
+		ensureMap(defaults, "imageModel")["primary"] = imageModel
 	}
+	if imageGenerationModel := strings.TrimSpace(values["IMAGE_GENERATION_MODEL"]); imageGenerationModel != "" {
+		ensureMap(defaults, "imageGenerationModel")["primary"] = imageGenerationModel
+	}
+	if videoGenerationModel := strings.TrimSpace(values["VIDEO_GENERATION_MODEL"]); videoGenerationModel != "" {
+		ensureMap(defaults, "videoGenerationModel")["primary"] = videoGenerationModel
+	}
+	return nil
+}
 
+func applyProviderConfig(current map[string]interface{}, values map[string]string) error {
 	baseURL := strings.TrimSpace(values["PROVIDER_BASE_URL"])
 	apiKeyEnv := strings.TrimSpace(values["PROVIDER_API_KEY_ENV"])
-	if baseURL == "" && apiKeyEnv == "" {
+	apiType := strings.TrimSpace(values["PROVIDER_API_TYPE"])
+	if apiType == "" {
+		apiType = "openai-completions"
+	}
+	modelRefs := collectConfiguredModelRefs(values)
+	if len(modelRefs) == 0 || (baseURL == "" && apiKeyEnv == "") {
 		return nil
 	}
 
@@ -241,20 +258,37 @@ func applyProviderConfig(current map[string]interface{}, modelRef string, values
 		models["mode"] = "merge"
 	}
 	providers := ensureMap(models, "providers")
-	providerCfg := ensureMap(providers, providerID)
-	providerCfg["api"] = "openai-completions"
-	if baseURL != "" {
-		providerCfg["baseUrl"] = baseURL
+	modelsByProvider := make(map[string][]string)
+	for _, ref := range modelRefs {
+		providerID, modelID, ok := splitModelRef(ref)
+		if !ok {
+			continue
+		}
+		if !containsString(modelsByProvider[providerID], modelID) {
+			modelsByProvider[providerID] = append(modelsByProvider[providerID], modelID)
+		}
 	}
-	if apiKeyEnv != "" {
-		providerCfg["apiKey"] = "${" + apiKeyEnv + "}"
-	}
-	providerCfg["models"] = []interface{}{
-		map[string]interface{}{
-			"id":    modelID,
-			"name":  modelID,
-			"input": []interface{}{"text"},
-		},
+	for providerID, modelIDs := range modelsByProvider {
+		providerCfg := ensureMap(providers, providerID)
+		providerCfg["api"] = apiType
+		if baseURL != "" {
+			providerCfg["baseUrl"] = baseURL
+		}
+		if apiKeyEnv != "" {
+			providerCfg["apiKey"] = "${" + apiKeyEnv + "}"
+		}
+		definitions := make([]interface{}, 0, len(modelIDs))
+		for _, modelID := range modelIDs {
+			definition := map[string]interface{}{
+				"id":   modelID,
+				"name": modelID,
+			}
+			if modelID == "MiniMax-M2.7" || modelID == "MiniMax-M2.7-highspeed" {
+				definition["input"] = []interface{}{"text", "image"}
+			}
+			definitions = append(definitions, definition)
+		}
+		providerCfg["models"] = definitions
 	}
 	return nil
 }
@@ -265,6 +299,37 @@ func splitModelRef(modelRef string) (string, string, bool) {
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+func collectConfiguredModelRefs(values map[string]string) []string {
+	keys := []string{"CHAT_MODEL", "LLM_MODEL", "IMAGE_MODEL", "IMAGE_GENERATION_MODEL", "VIDEO_GENERATION_MODEL"}
+	refs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := strings.TrimSpace(values[key])
+		if value == "" || containsString(refs, value) {
+			continue
+		}
+		refs = append(refs, value)
+	}
+	return refs
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmptyValue(values map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(values[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func failedAck(version int64, daemonVersion, code string, err error) protocol.SysConfigAckPayload {

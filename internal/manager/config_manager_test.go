@@ -49,10 +49,14 @@ func TestApplyWritesEnvAndState(t *testing.T) {
 		Config: map[string]string{
 			"API_KEY":                "sk-test",
 			"OPENCLAW_GATEWAY_TOKEN": "token-1",
-			"LLM_MODEL":              "moonshot/kimi-k2.5",
-			"PROVIDER_API_KEY_ENV":   "MOONSHOT_API_KEY",
-			"PROVIDER_BASE_URL":      "https://api.moonshot.cn/v1",
-			"MOONSHOT_API_KEY":       "provider-key",
+			"CHAT_MODEL":             "minimax/MiniMax-M2.7",
+			"IMAGE_MODEL":            "minimax/MiniMax-VL-01",
+			"IMAGE_GENERATION_MODEL": "minimax/image-01",
+			"VIDEO_GENERATION_MODEL": "minimax/video-01",
+			"PROVIDER_API_KEY_ENV":   "MINIMAX_API_KEY",
+			"PROVIDER_BASE_URL":      "https://api.minimaxi.com/anthropic",
+			"PROVIDER_API_TYPE":      "anthropic-messages",
+			"MINIMAX_API_KEY":        "provider-key",
 		},
 	}, "0.1.0")
 
@@ -77,7 +81,7 @@ func TestApplyWritesEnvAndState(t *testing.T) {
 	if strings.Contains(content, "PROVIDER_BASE_URL") {
 		t.Fatalf("daemon-only provider base url should not be written to .env: %s", content)
 	}
-	if !strings.Contains(content, "MOONSHOT_API_KEY='provider-key'") {
+	if !strings.Contains(content, "MINIMAX_API_KEY='provider-key'") {
 		t.Fatalf("env file missing provider api key: %s", content)
 	}
 
@@ -91,12 +95,26 @@ func TestApplyWritesEnvAndState(t *testing.T) {
 	}
 	models := parsed["models"].(map[string]interface{})
 	providers := models["providers"].(map[string]interface{})
-	moonshot := providers["moonshot"].(map[string]interface{})
-	if moonshot["baseUrl"] != "https://api.moonshot.cn/v1" {
-		t.Fatalf("unexpected provider baseUrl: %+v", moonshot)
+	minimax := providers["minimax"].(map[string]interface{})
+	if minimax["baseUrl"] != "https://api.minimaxi.com/anthropic" {
+		t.Fatalf("unexpected provider baseUrl: %+v", minimax)
 	}
-	if moonshot["apiKey"] != "${MOONSHOT_API_KEY}" {
-		t.Fatalf("unexpected provider apiKey placeholder: %+v", moonshot)
+	if minimax["apiKey"] != "${MINIMAX_API_KEY}" {
+		t.Fatalf("unexpected provider apiKey placeholder: %+v", minimax)
+	}
+	if minimax["api"] != "anthropic-messages" {
+		t.Fatalf("unexpected provider api type: %+v", minimax)
+	}
+	agents := parsed["agents"].(map[string]interface{})
+	defaults := agents["defaults"].(map[string]interface{})
+	if defaults["imageModel"].(map[string]interface{})["primary"] != "minimax/MiniMax-VL-01" {
+		t.Fatalf("unexpected imageModel defaults: %+v", defaults)
+	}
+	if defaults["imageGenerationModel"].(map[string]interface{})["primary"] != "minimax/image-01" {
+		t.Fatalf("unexpected imageGenerationModel defaults: %+v", defaults)
+	}
+	if defaults["videoGenerationModel"].(map[string]interface{})["primary"] != "minimax/video-01" {
+		t.Fatalf("unexpected videoGenerationModel defaults: %+v", defaults)
 	}
 
 	state, err := store.NewFileStore(filepath.Join(tmpDir, "state.json")).Load()
