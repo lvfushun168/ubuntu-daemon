@@ -549,18 +549,40 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 		attachments = deduplicateAttachments(attachments)
 
 		if isTerminalChatEvent(event.Event, payloadMap) {
-			needTranscriptLookup := strings.TrimSpace(assembledText) == "" &&
-				(strings.TrimSpace(pendingSnapshotText) == "" || !pendingSnapshotVerified)
+			needTranscriptLookup := strings.TrimSpace(openClawSessionID) != "" &&
+				(transcriptMinAssistantAfterMs > 0 || strings.TrimSpace(assembledText) == "" ||
+					strings.TrimSpace(pendingSnapshotText) == "" || !pendingSnapshotVerified)
 			if needTranscriptLookup {
 				transcriptText, transcriptAttachments, err := a.loadTranscriptAssistantReply(ctx, openClawSessionID, transcriptMinAssistantAfterMs)
 				if err != nil {
 					a.logger.Printf("load transcript assistant reply failed sessionID=%s openclawSessionID=%s err=%v",
 						sessionID, openClawSessionID, err)
 				} else if strings.TrimSpace(transcriptText) != "" {
-					pendingSnapshotText = transcriptText
-					pendingSnapshotVerified = true
 					attachments = append(attachments, transcriptAttachments...)
 					attachments = deduplicateAttachments(attachments)
+					baseText := assembledText
+					if strings.TrimSpace(baseText) == "" {
+						baseText = pendingSnapshotText
+					}
+					if strings.TrimSpace(baseText) == "" {
+						pendingSnapshotText = transcriptText
+						pendingSnapshotVerified = true
+					} else {
+						deltaText, nextAssembledText := incrementalReplyText(baseText, transcriptText)
+						assembledText = nextAssembledText
+						pendingSnapshotText = transcriptText
+						pendingSnapshotVerified = true
+						if deltaText != "" {
+							chunkSeq++
+							replies = append(replies, protocol.ChatReplyPayload{
+								RequestMsgID: cloudMsgID,
+								RunID:        runID,
+								Role:         "assistant",
+								Text:         deltaText,
+								ChunkSeq:     chunkSeq,
+							})
+						}
+					}
 					a.logger.Printf("recovered assistant reply from transcript sessionID=%s openclawSessionID=%s",
 						sessionID, openClawSessionID)
 				}
@@ -575,17 +597,32 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 				}
 			}
 			if pendingSnapshotText != "" {
-				replies = []protocol.ChatReplyPayload{
-					{
-						RequestMsgID: cloudMsgID,
-						RunID:        runID,
-						Role:         "assistant",
-						Text:         pendingSnapshotText,
-						ChunkSeq:     1,
-					},
+				if len(replies) == 0 {
+					replies = []protocol.ChatReplyPayload{
+						{
+							RequestMsgID: cloudMsgID,
+							RunID:        runID,
+							Role:         "assistant",
+							Text:         pendingSnapshotText,
+							ChunkSeq:     1,
+						},
+					}
+					chunkSeq = 1
+					assembledText = pendingSnapshotText
+				} else if strings.TrimSpace(assembledText) != "" {
+					deltaText, nextAssembledText := incrementalReplyText(assembledText, pendingSnapshotText)
+					assembledText = nextAssembledText
+					if deltaText != "" {
+						chunkSeq++
+						replies = append(replies, protocol.ChatReplyPayload{
+							RequestMsgID: cloudMsgID,
+							RunID:        runID,
+							Role:         "assistant",
+							Text:         deltaText,
+							ChunkSeq:     chunkSeq,
+						})
+					}
 				}
-				chunkSeq = 1
-				assembledText = pendingSnapshotText
 			}
 			if len(replies) == 0 {
 				chunkSeq++
@@ -1268,42 +1305,49 @@ func (a *Adapter) loadTranscriptAssistantReply(ctx context.Context, openClawSess
 		resolveTimeout = 120 * time.Second
 	}
 	deadline := time.Now().Add(resolveTimeout)
+	bestText := ""
+	var bestAttachments []protocol.ChatAttachment
 	for {
-		text, attachments, assistantTimestamp, err := a.readTranscriptAssistantReply(openClawSessionID)
+		text, attachments, assistantTimestamp, complete, err := a.readTranscriptAssistantReply(openClawSessionID)
 		if err != nil {
 			return "", nil, err
 		}
 		if strings.TrimSpace(text) != "" && (minAssistantAfterMs <= 0 || assistantTimestamp > minAssistantAfterMs) {
+			bestText = text
+			bestAttachments = attachments
+		}
+		if strings.TrimSpace(bestText) != "" && complete && (minAssistantAfterMs <= 0 || assistantTimestamp > minAssistantAfterMs) {
 			return text, attachments, nil
 		}
 		if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 			deadline = ctxDeadline
 		}
 		if time.Now().After(deadline) {
-			return text, attachments, nil
+			return bestText, bestAttachments, nil
 		}
 		select {
 		case <-ctx.Done():
-			return text, attachments, ctx.Err()
+			return bestText, bestAttachments, ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }
 
-func (a *Adapter) readTranscriptAssistantReply(openClawSessionID string) (string, []protocol.ChatAttachment, int64, error) {
+func (a *Adapter) readTranscriptAssistantReply(openClawSessionID string) (string, []protocol.ChatAttachment, int64, bool, error) {
 	path := a.transcriptSessionPath(openClawSessionID)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", nil, 0, nil
+			return "", nil, 0, false, nil
 		}
-		return "", nil, 0, fmt.Errorf("read transcript %s: %w", path, err)
+		return "", nil, 0, false, fmt.Errorf("read transcript %s: %w", path, err)
 	}
 	var (
-		lastAssistantText        string
-		lastAssistantAttachments []protocol.ChatAttachment
-		lastAssistantTimestamp   int64
-		awaitingAssistant        bool
+		currentAssistantTexts       []string
+		currentAssistantAttachments []protocol.ChatAttachment
+		lastAssistantTimestamp      int64
+		lastAssistantStopReason     string
+		currentTurnStarted          bool
 	)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -1325,26 +1369,31 @@ func (a *Adapter) readTranscriptAssistantReply(openClawSessionID string) (string
 
 		switch role := strings.ToLower(strings.TrimSpace(firstString(message, "role"))); role {
 		case "user":
-			awaitingAssistant = true
-			lastAssistantText = ""
-			lastAssistantAttachments = nil
+			currentTurnStarted = true
+			currentAssistantTexts = nil
+			currentAssistantAttachments = nil
 			lastAssistantTimestamp = 0
+			lastAssistantStopReason = ""
 		case "assistant":
-			if !awaitingAssistant {
+			if !currentTurnStarted {
 				continue
 			}
 			text := strings.Trim(extractMarkdownBlocks(message["content"]), "\n")
 			if text == "" {
 				text = strings.Trim(firstNonEmptyString(message, "text", "value"), "\n")
 			}
-			lastAssistantText = text
-			lastAssistantAttachments = deduplicateAttachments(extractMediaAttachments(message, text))
+			if text != "" {
+				currentAssistantTexts = append(currentAssistantTexts, text)
+			}
+			currentAssistantAttachments = append(currentAssistantAttachments, extractMediaAttachments(message, text)...)
+			currentAssistantAttachments = deduplicateAttachments(currentAssistantAttachments)
 			lastAssistantTimestamp = entryTimestamp
-			awaitingAssistant = false
+			lastAssistantStopReason = strings.ToLower(strings.TrimSpace(firstString(message, "stopReason", "stop_reason")))
 		}
 	}
 
-	return lastAssistantText, lastAssistantAttachments, lastAssistantTimestamp, nil
+	complete := lastAssistantTimestamp > 0 && lastAssistantStopReason != "tooluse" && lastAssistantStopReason != "tool_use"
+	return joinMarkdownBlocks(currentAssistantTexts), currentAssistantAttachments, lastAssistantTimestamp, complete, nil
 }
 
 func transcriptEntryTimestampMillis(entry map[string]interface{}, message map[string]interface{}) int64 {

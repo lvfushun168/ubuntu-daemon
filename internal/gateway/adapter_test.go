@@ -1642,18 +1642,21 @@ func TestAdapterChatIgnoresAgentToolCompletionBeforeFinalAssistantReply(t *testi
 	if err != nil {
 		t.Fatalf("chat failed: %v", err)
 	}
-	if len(replies) != 1 {
+	if len(replies) != 2 {
 		data, _ := json.Marshal(replies)
-		t.Fatalf("expected collapsed final reply, got %d %s", len(replies), string(data))
+		t.Fatalf("expected streamed reply plus final reply, got %d %s", len(replies), string(data))
 	}
-	if replies[0].Text != "完成啦，这是正在喝茶的猫。" {
-		t.Fatalf("unexpected final reply: %+v", replies[0])
+	if replies[0].Text != "好的，我来创作一幅正在喝茶的猫。" || replies[0].IsFinal || replies[0].IsEnd {
+		t.Fatalf("unexpected first reply: %+v", replies[0])
 	}
-	if len(replies[0].Attachments) != 1 || replies[0].Attachments[0].PreviewURL != "https://example.com/cat-drinking-tea.png" {
-		t.Fatalf("expected attachment from tool event, got %+v", replies[0].Attachments)
+	if replies[1].Text != "完成啦，这是正在喝茶的猫。" {
+		t.Fatalf("unexpected final reply: %+v", replies[1])
 	}
-	if !replies[0].IsFinal || !replies[0].IsEnd || replies[0].FinishReason != "stop" {
-		t.Fatalf("unexpected final flags: %+v", replies[0])
+	if len(replies[1].Attachments) != 1 || replies[1].Attachments[0].PreviewURL != "https://example.com/cat-drinking-tea.png" {
+		t.Fatalf("expected attachment from tool event, got %+v", replies[1].Attachments)
+	}
+	if !replies[1].IsFinal || !replies[1].IsEnd || replies[1].FinishReason != "stop" {
+		t.Fatalf("unexpected final flags: %+v", replies[1])
 	}
 }
 
@@ -1755,6 +1758,173 @@ func TestAdapterChatReturnsExplicitErrorInsteadOfEmptySuccessReply(t *testing.T)
 	}
 	if replies[0].FinishReason != "error" || replies[0].ErrorCode != "ASSISTANT_REPLY_MISSING" {
 		t.Fatalf("expected explicit missing-reply error, got %+v", replies[0])
+	}
+}
+
+func TestAdapterChatWaitsForFollowUpAssistantAfterToolUseTranscript(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "event",
+			"event":   "connect.challenge",
+			"payload": map[string]interface{}{"nonce": "nonce-follow-up"},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":    "res",
+			"id":      connectReq["id"],
+			"ok":      true,
+			"payload": map[string]interface{}{"status": "ok"},
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"subscribed": true,
+				"key":        "cloud-session-follow-up",
+			},
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId":  "run-follow-up",
+				"status": "started",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+
+		events := []map[string]interface{}{
+			{
+				"type":  "event",
+				"event": "chat",
+				"payload": map[string]interface{}{
+					"runId":      "run-follow-up",
+					"sessionKey": "agent:main:cloud-session-follow-up",
+					"stream":     "assistant",
+					"delta":      "好的，我来创作一幅正在喝茶的猫。",
+				},
+			},
+			{
+				"type":  "event",
+				"event": "chat",
+				"payload": map[string]interface{}{
+					"runId":      "run-follow-up",
+					"sessionKey": "agent:main:cloud-session-follow-up",
+					"sessionId":  "openclaw-session-follow-up",
+					"message": map[string]interface{}{
+						"role":      "user",
+						"timestamp": float64(2000),
+					},
+					"state": "final",
+				},
+			},
+		}
+		for _, event := range events {
+			if err := conn.WriteJSON(event); err != nil {
+				t.Fatalf("write event: %v", err)
+			}
+		}
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	envPath := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envPath, []byte("OPENCLAW_GATEWAY_TOKEN='token-follow-up'\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	transcriptDir := filepath.Join(tmpDir, "agents", "main", "sessions")
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	transcriptPath := filepath.Join(transcriptDir, "openclaw-session-follow-up.jsonl")
+	initialTranscript := strings.Join([]string{
+		`{"type":"message","message":{"role":"user","timestamp":2000,"content":[{"type":"text","text":"请创作一幅正在喝茶的猫"}]}}`,
+		`{"type":"message","message":{"role":"assistant","timestamp":2100,"content":[{"type":"text","text":"好的，我来创作一幅正在喝茶的猫。"},{"type":"toolCall","name":"image_generate"}],"stopReason":"toolUse"}}`,
+	}, "\n")
+	if err := os.WriteFile(transcriptPath, []byte(initialTranscript), 0o600); err != nil {
+		t.Fatalf("write initial transcript: %v", err)
+	}
+
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		updatedTranscript := initialTranscript + "\n" +
+			`{"type":"message","message":{"role":"assistant","timestamp":2300,"content":[{"type":"text","text":"完成啦！这是正在喝茶的猫。"}],"stopReason":"stop"}}`
+		_ = os.WriteFile(transcriptPath, []byte(updatedTranscript), 0o600)
+	}()
+
+	cfg := &config.Config{
+		DeviceID:      "device-1",
+		DaemonVersion: "0.1.0",
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
+		OpenClaw: config.OpenClawConfig{
+			WorkDir:                tmpDir,
+			EnvFile:                envPath,
+			GatewayWSURL:           "ws" + strings.TrimPrefix(server.URL, "http"),
+			GatewayTokenEnvKey:     "OPENCLAW_GATEWAY_TOKEN",
+			ReplyResolveTimeoutSec: 3,
+		},
+	}
+	adapter := NewAdapter(cfg, log.New(os.Stdout, "", 0), store.NewFileStore(cfg.Store.StateFile))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "cloud-session-follow-up",
+		Role:      "user",
+		Text:      "请创作一幅正在喝茶的猫",
+		Stream:    true,
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-follow-up",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 2 {
+		data, _ := json.Marshal(replies)
+		t.Fatalf("expected 2 replies, got %d %s", len(replies), string(data))
+	}
+	if replies[0].Text != "好的，我来创作一幅正在喝茶的猫。" {
+		t.Fatalf("unexpected first reply: %+v", replies[0])
+	}
+	if !strings.Contains(replies[1].Text, "完成啦！这是正在喝茶的猫。") {
+		t.Fatalf("expected follow-up assistant delta, got %+v", replies[1])
+	}
+	if !replies[1].IsFinal || !replies[1].IsEnd || replies[1].FinishReason != "stop" {
+		t.Fatalf("unexpected final flags: %+v", replies[1])
 	}
 }
 
