@@ -105,13 +105,6 @@ func (s *Service) generate(ctx context.Context, requestMsgID string, payload pro
 		return s.errorReplies(payload.SessionID, "VIDEO_REQUEST_UNSUPPORTED", "video prompt is empty"), nil
 	}
 
-	progress := protocol.ChatReplyPayload{
-		SessionID: payload.SessionID,
-		Role:      "assistant",
-		Text:      "正在生成视频，预计需要几十秒，请稍候",
-		ChunkSeq:  1,
-	}
-
 	createCtx, cancelCreate := context.WithTimeout(ctx, time.Duration(videoCfg.CreateTimeoutSec)*time.Second)
 	taskID, err := client.CreateTextToVideo(createCtx, GenerationRequest{
 		Model:           model,
@@ -123,16 +116,18 @@ func (s *Service) generate(ctx context.Context, requestMsgID string, payload pro
 	cancelCreate()
 	if err != nil {
 		s.logger.Printf("video task create failed request_msg_id=%s err=%v", requestMsgID, err)
-		return append([]protocol.ChatReplyPayload{progress},
-			s.finalErrorReply(payload.SessionID, 2, "VIDEO_TASK_CREATE_FAILED", err.Error())), nil
+		return []protocol.ChatReplyPayload{
+			s.finalErrorReply(payload.SessionID, 2, "VIDEO_TASK_CREATE_FAILED", err.Error()),
+		}, nil
 	}
 	s.logger.Printf("video task created request_msg_id=%s task_id=%s", requestMsgID, taskID)
 
 	status, err := s.pollTask(ctx, client, taskID, videoCfg)
 	if err != nil {
 		s.logger.Printf("video task timeout request_msg_id=%s task_id=%s err=%v", requestMsgID, taskID, err)
-		return append([]protocol.ChatReplyPayload{progress},
-			s.finalErrorReply(payload.SessionID, 2, "VIDEO_TASK_TIMEOUT", err.Error())), nil
+		return []protocol.ChatReplyPayload{
+			s.finalErrorReply(payload.SessionID, 2, "VIDEO_TASK_TIMEOUT", err.Error()),
+		}, nil
 	}
 	if isFailedStatus(status.Status) {
 		s.logger.Printf("video task failed request_msg_id=%s task_id=%s status=%s", requestMsgID, status.TaskID, status.Status)
@@ -140,13 +135,15 @@ func (s *Service) generate(ctx context.Context, requestMsgID string, payload pro
 		if status.TaskID != "" {
 			msg = fmt.Sprintf("video task %s failed", status.TaskID)
 		}
-		return append([]protocol.ChatReplyPayload{progress},
-			s.finalErrorReply(payload.SessionID, 2, "VIDEO_TASK_FAILED", msg)), nil
+		return []protocol.ChatReplyPayload{
+			s.finalErrorReply(payload.SessionID, 2, "VIDEO_TASK_FAILED", msg),
+		}, nil
 	}
 	if strings.TrimSpace(status.FileID) == "" {
 		s.logger.Printf("video task missing file_id request_msg_id=%s task_id=%s", requestMsgID, status.TaskID)
-		return append([]protocol.ChatReplyPayload{progress},
-			s.finalErrorReply(payload.SessionID, 2, "VIDEO_FILE_RETRIEVE_FAILED", "video task succeeded but file_id is empty")), nil
+		return []protocol.ChatReplyPayload{
+			s.finalErrorReply(payload.SessionID, 2, "VIDEO_FILE_RETRIEVE_FAILED", "video task succeeded but file_id is empty"),
+		}, nil
 	}
 
 	queryCtx, cancelRetrieve := context.WithTimeout(ctx, time.Duration(videoCfg.QueryTimeoutSec)*time.Second)
@@ -154,15 +151,17 @@ func (s *Service) generate(ctx context.Context, requestMsgID string, payload pro
 	cancelRetrieve()
 	if err != nil {
 		s.logger.Printf("video file retrieve failed request_msg_id=%s file_id=%s err=%v", requestMsgID, status.FileID, err)
-		return append([]protocol.ChatReplyPayload{progress},
-			s.finalErrorReply(payload.SessionID, 2, "VIDEO_FILE_RETRIEVE_FAILED", err.Error())), nil
+		return []protocol.ChatReplyPayload{
+			s.finalErrorReply(payload.SessionID, 2, "VIDEO_FILE_RETRIEVE_FAILED", err.Error()),
+		}, nil
 	}
 
 	localPath, err := s.downloadVideo(ctx, requestMsgID, downloadURL, videoCfg)
 	if err != nil {
 		s.logger.Printf("video download failed request_msg_id=%s url=%s err=%v", requestMsgID, downloadURL, err)
-		return append([]protocol.ChatReplyPayload{progress},
-			s.finalErrorReply(payload.SessionID, 2, "VIDEO_DOWNLOAD_FAILED", err.Error())), nil
+		return []protocol.ChatReplyPayload{
+			s.finalErrorReply(payload.SessionID, 2, "VIDEO_DOWNLOAD_FAILED", err.Error()),
+		}, nil
 	}
 
 	uploaded, err := s.uploader.UploadLocalAttachment(ctx, payload.SessionID, requestMsgID, protocol.ChatAttachment{
@@ -172,13 +171,15 @@ func (s *Service) generate(ctx context.Context, requestMsgID string, payload pro
 	})
 	if err != nil {
 		s.logger.Printf("video upload failed request_msg_id=%s local_path=%s err=%v", requestMsgID, localPath, err)
-		return append([]protocol.ChatReplyPayload{progress},
-			s.finalErrorReply(payload.SessionID, 2, "VIDEO_UPLOAD_FAILED", err.Error())), nil
+		return []protocol.ChatReplyPayload{
+			s.finalErrorReply(payload.SessionID, 2, "VIDEO_UPLOAD_FAILED", err.Error()),
+		}, nil
 	}
 	if strings.TrimSpace(uploaded.PreviewURL) == "" || strings.TrimSpace(uploaded.MediaID) == "" {
 		s.logger.Printf("video upload missing fields request_msg_id=%s media_id=%s preview_url=%s", requestMsgID, uploaded.MediaID, uploaded.PreviewURL)
-		return append([]protocol.ChatReplyPayload{progress},
-			s.finalErrorReply(payload.SessionID, 2, "VIDEO_UPLOAD_FAILED", "uploaded video missing media_id or preview_url")), nil
+		return []protocol.ChatReplyPayload{
+			s.finalErrorReply(payload.SessionID, 2, "VIDEO_UPLOAD_FAILED", "uploaded video missing media_id or preview_url"),
+		}, nil
 	}
 
 	final := protocol.ChatReplyPayload{
@@ -194,7 +195,7 @@ func (s *Service) generate(ctx context.Context, requestMsgID string, payload pro
 		},
 	}
 	s.logger.Printf("video generate success request_msg_id=%s media_id=%s preview_url=%s", requestMsgID, uploaded.MediaID, uploaded.PreviewURL)
-	return []protocol.ChatReplyPayload{progress, final}, nil
+	return []protocol.ChatReplyPayload{final}, nil
 }
 
 func (s *Service) pollTask(ctx context.Context, client VideoClient, taskID string, videoCfg config.VideoConfig) (TaskStatus, error) {

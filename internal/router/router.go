@@ -127,6 +127,16 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 		envelope.MsgID, payload.SessionID, videoEnabled, videoMatched, payload.Text)
 
 	if videoMatched {
+		r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
+			RequestMsgID: envelope.MsgID,
+			SessionID:    payload.SessionID,
+			Role:         "assistant",
+			Text:         "正在生成视频，预计需要几十秒，请稍候",
+			ChunkSeq:     1,
+			IsFinal:      false,
+			IsEnd:        false,
+		})
+
 		replies, err := r.videoService.Generate(ctx, envelope.MsgID, payload)
 		if err != nil {
 			r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
