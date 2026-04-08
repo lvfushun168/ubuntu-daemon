@@ -2172,6 +2172,41 @@ func TestAdapterChatIgnoresStaleSnapshotWithoutRunIdAndFallsBackToTranscript(t *
 	}
 }
 
+func TestSummarizeAttachmentFailuresReturnsTopLevelFailureWhenAllAttachmentsFail(t *testing.T) {
+	errorCode, errorMessage, ok := summarizeAttachmentFailures([]protocol.ChatAttachment{
+		{
+			LocalPath:    "/tmp/cat.png",
+			ErrorCode:    "MEDIA_UPLOAD_FAILED",
+			ErrorMessage: "put media file failed http=451 body=UnavailableForLegalReasons",
+		},
+	})
+	if !ok {
+		t.Fatalf("expected attachment failure summary")
+	}
+	if errorCode != "MEDIA_UPLOAD_FAILED" {
+		t.Fatalf("unexpected error code: %s", errorCode)
+	}
+	if !strings.Contains(errorMessage, "http=451") {
+		t.Fatalf("unexpected error message: %s", errorMessage)
+	}
+}
+
+func TestSummarizeAttachmentFailuresIgnoresMixedSuccess(t *testing.T) {
+	_, _, ok := summarizeAttachmentFailures([]protocol.ChatAttachment{
+		{
+			PreviewURL: "https://example.com/cat.png",
+		},
+		{
+			LocalPath:    "/tmp/cat2.png",
+			ErrorCode:    "MEDIA_UPLOAD_FAILED",
+			ErrorMessage: "put media file failed",
+		},
+	})
+	if ok {
+		t.Fatalf("expected mixed attachment results to stay non-fatal")
+	}
+}
+
 func newTestAdapter(t *testing.T, wsURL, token string) *Adapter {
 	t.Helper()
 

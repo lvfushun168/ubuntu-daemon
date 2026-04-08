@@ -646,6 +646,16 @@ func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, 
 			if len(attachments) > 0 {
 				replies[last].Text = rewriteMarkdownImageURLs(replies[last].Text, attachments)
 				replies[last].Attachments = attachments
+				if errorCode, errorMessage, ok := summarizeAttachmentFailures(attachments); ok {
+					replies[last].FinishReason = "error"
+					if strings.TrimSpace(replies[last].ErrorCode) == "" {
+						replies[last].ErrorCode = errorCode
+					}
+					if strings.TrimSpace(replies[last].ErrorMessage) == "" {
+						replies[last].ErrorMessage = errorMessage
+					}
+					replies[last].Text = appendAttachmentFailureNotice(replies[last].Text, errorMessage)
+				}
 			}
 			if strings.TrimSpace(replies[last].Text) == "" &&
 				len(replies[last].Attachments) == 0 &&
@@ -1810,6 +1820,46 @@ func deduplicateAttachments(items []protocol.ChatAttachment) []protocol.ChatAtta
 		result = append(result, item)
 	}
 	return result
+}
+
+func summarizeAttachmentFailures(items []protocol.ChatAttachment) (string, string, bool) {
+	if len(items) == 0 {
+		return "", "", false
+	}
+	hasFailure := false
+	for _, item := range items {
+		if strings.TrimSpace(item.PreviewURL) != "" || strings.TrimSpace(item.MediaID) != "" {
+			return "", "", false
+		}
+		if strings.TrimSpace(item.ErrorCode) == "" {
+			return "", "", false
+		}
+		hasFailure = true
+	}
+	if !hasFailure {
+		return "", "", false
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item.ErrorMessage) != "" {
+			return "MEDIA_UPLOAD_FAILED", item.ErrorMessage, true
+		}
+	}
+	return "MEDIA_UPLOAD_FAILED", "media upload failed", true
+}
+
+func appendAttachmentFailureNotice(text, errorMessage string) string {
+	notice := "媒体文件上传失败"
+	if msg := strings.TrimSpace(errorMessage); msg != "" {
+		notice = notice + "：" + msg
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return notice
+	}
+	if strings.Contains(trimmed, notice) {
+		return text
+	}
+	return strings.TrimRight(text, "\n") + "\n\n" + notice
 }
 
 func isHTTPURL(raw string) bool {

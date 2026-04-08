@@ -54,6 +54,7 @@ type RemoteCmdConfig struct {
 	DefaultTimeoutSec int      `json:"default_timeout_sec"`
 	MaxTimeoutSec     int      `json:"max_timeout_sec"`
 	MaxOutputBytes    int      `json:"max_output_bytes"`
+	AllowAll          bool     `json:"allow_all"`
 	Whitelist         []string `json:"whitelist"`
 }
 
@@ -155,6 +156,7 @@ func defaultConfig() *Config {
 			DefaultTimeoutSec: 30,
 			MaxTimeoutSec:     300,
 			MaxOutputBytes:    64 * 1024,
+			AllowAll:          true,
 		},
 		Store: StoreConfig{
 			StateFile: "/root/.openclaw/daemon-state.json",

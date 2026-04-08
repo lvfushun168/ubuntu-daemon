@@ -90,6 +90,9 @@ func (r *RemoteCommandRunner) Execute(ctx context.Context, payload protocol.Remo
 }
 
 func (r *RemoteCommandRunner) validate(command string) error {
+	if r.cfg.AllowAll {
+		return nil
+	}
 	if len(r.cfg.Whitelist) == 0 {
 		return nil
 	}

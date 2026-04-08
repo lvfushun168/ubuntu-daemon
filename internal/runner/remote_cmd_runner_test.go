@@ -13,6 +13,7 @@ func TestRemoteCommandRejectsNonWhitelistedCommand(t *testing.T) {
 		DefaultTimeoutSec: 1,
 		MaxTimeoutSec:     5,
 		MaxOutputBytes:    1024,
+		AllowAll:          false,
 		Whitelist:         []string{"bash"},
 	}, NewExecRunner())
 
@@ -26,5 +27,25 @@ func TestRemoteCommandRejectsNonWhitelistedCommand(t *testing.T) {
 	}
 	if result.ErrorCode != "COMMAND_REJECTED" {
 		t.Fatalf("expected COMMAND_REJECTED, got %+v", result)
+	}
+}
+
+func TestRemoteCommandAllowsAnyCommandWhenAllowAllEnabled(t *testing.T) {
+	runner := NewRemoteCommandRunner(config.RemoteCmdConfig{
+		DefaultTimeoutSec: 1,
+		MaxTimeoutSec:     5,
+		MaxOutputBytes:    1024,
+		AllowAll:          true,
+		Whitelist:         []string{"bash"},
+	}, NewExecRunner())
+
+	result := runner.Execute(context.Background(), protocol.RemoteCmdPayload{
+		CommandID: "cmd-2",
+		Command:   "sh",
+		Args:      []string{"-c", "echo openclaw"},
+	})
+
+	if result.Status != "success" {
+		t.Fatalf("expected success, got %+v", result)
 	}
 }
