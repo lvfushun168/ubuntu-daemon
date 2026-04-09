@@ -99,6 +99,14 @@ func (m *ConfigManager) writeEnv(openClawCfg config.OpenClawConfig, values map[s
 			effective["VORTEX_OPENAI_API_KEY"] = apiKey
 		}
 	}
+	// 兼容历史配置里仍保留 minimax provider secret 引用的情况。
+	// 这样即使本次主模型已切到其他 provider，也不会因为旧 placeholder
+	// 缺少环境变量而让 Gateway 在启动阶段直接失败。
+	if _, ok := effective["MINIMAX_API_KEY"]; !ok {
+		if apiKey, has := effective["API_KEY"]; has && apiKey != "" {
+			effective["MINIMAX_API_KEY"] = apiKey
+		}
+	}
 
 	keys := make([]string, 0, len(effective))
 	for key := range effective {
@@ -197,6 +205,9 @@ func (m *ConfigManager) checkGatewayHealth(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if token, err := loadGatewayTokenFromEnvFile(openClawCfg); err == nil && token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -231,10 +242,15 @@ func isDaemonOnlyConfigKey(key string) bool {
 func applyCapabilityModels(defaults map[string]interface{}, values map[string]string) error {
 	if imageModel := strings.TrimSpace(values["IMAGE_MODEL"]); imageModel != "" {
 		ensureMap(defaults, "imageModel")["primary"] = imageModel
+	} else {
+		delete(defaults, "imageModel")
 	}
 	if imageGenerationModel := strings.TrimSpace(values["IMAGE_GENERATION_MODEL"]); imageGenerationModel != "" {
 		ensureMap(defaults, "imageGenerationModel")["primary"] = imageGenerationModel
+	} else {
+		delete(defaults, "imageGenerationModel")
 	}
+	delete(defaults, "videoGenerationModel")
 	return nil
 }
 
@@ -359,6 +375,42 @@ func ensureMap(root map[string]interface{}, key string) map[string]interface{} {
 func shellEscape(value string) string {
 	quoted := strings.ReplaceAll(value, "'", "'\"'\"'")
 	return "'" + quoted + "'"
+}
+
+func trimEnvValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 {
+		if (value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"') {
+			value = value[1 : len(value)-1]
+		}
+	}
+	return value
+}
+
+func loadGatewayTokenFromEnvFile(openClawCfg config.OpenClawConfig) (string, error) {
+	envKey := openClawCfg.GatewayTokenEnvKey
+	if envKey == "" {
+		envKey = "OPENCLAW_GATEWAY_TOKEN"
+	}
+	if token := strings.TrimSpace(os.Getenv(envKey)); token != "" {
+		return token, nil
+	}
+	envData, err := os.ReadFile(openClawCfg.EnvFile)
+	if err != nil {
+		return "", fmt.Errorf("read env file: %w", err)
+	}
+	for _, line := range strings.Split(string(envData), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != envKey {
+			continue
+		}
+		return trimEnvValue(value), nil
+	}
+	return "", fmt.Errorf("gateway token %q is missing", envKey)
 }
 
 func storeWriteFile(path string, data []byte, mode os.FileMode) error {

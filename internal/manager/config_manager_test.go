@@ -3,6 +3,8 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +19,12 @@ type stubExecutor struct{}
 
 func (s stubExecutor) Run(ctx context.Context, command string, args []string, workDir string) (string, string, int, error) {
 	return "ok", "", 0, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestApplyWritesEnvAndState(t *testing.T) {
@@ -193,5 +201,140 @@ func TestLoadUsesDeviceIDFromEnv(t *testing.T) {
 	}
 	if cfg.DeviceID != "aa:bb:cc:dd:ee:ff" {
 		t.Fatalf("unexpected device_id: %s", cfg.DeviceID)
+	}
+}
+
+func TestApplyBackfillsMinimaxKeyAndClearsStaleCapabilityModels(t *testing.T) {
+	tmpDir := t.TempDir()
+	jsonPath := filepath.Join(tmpDir, "openclaw.json")
+	initialJSON := `{
+  "agents": {
+    "defaults": {
+      "imageModel": {"primary": "minimax/MiniMax-VL-01"},
+      "imageGenerationModel": {"primary": "minimax/image-01"},
+      "videoGenerationModel": {"primary": "minimax/video-01"}
+    }
+  },
+  "models": {
+    "providers": {
+      "minimax": {
+        "apiKey": "${MINIMAX_API_KEY}"
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(jsonPath, []byte(initialJSON), 0o644); err != nil {
+		t.Fatalf("write initial json: %v", err)
+	}
+
+	cfg := &config.Config{
+		DeviceID:      "device-1",
+		DaemonVersion: "0.1.0",
+		Cloud: config.CloudConfig{
+			WSURL: "ws://43.156.161.7:18080/ws/device",
+		},
+		OpenClaw: config.OpenClawConfig{
+			WorkDir:               tmpDir,
+			EnvFile:               filepath.Join(tmpDir, ".env"),
+			JSONConfigFile:        jsonPath,
+			GatewayHealthURL:      "",
+			GatewayTokenEnvKey:    "OPENCLAW_GATEWAY_TOKEN",
+			RestartTimeoutSec:     1,
+			HealthCheckTimeoutSec: 1,
+		},
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
+	}
+	manager := NewConfigManager(cfg, store.NewFileStore(filepath.Join(tmpDir, "state.json")), stubExecutor{})
+
+	reply := manager.Apply(context.Background(), protocol.SysConfigPayload{
+		ConfigVersion: 1,
+		Config: map[string]string{
+			"API_KEY":                "sk-test",
+			"OPENCLAW_GATEWAY_TOKEN": "token-1",
+			"CHAT_MODEL":             "moonshot/kimi-k2.5",
+		},
+	}, "0.1.0")
+	if reply.Status != "success" {
+		t.Fatalf("expected success, got %+v", reply)
+	}
+
+	envData, err := os.ReadFile(filepath.Join(tmpDir, ".env"))
+	if err != nil {
+		t.Fatalf("read env: %v", err)
+	}
+	content := string(envData)
+	if !strings.Contains(content, "MINIMAX_API_KEY='sk-test'") {
+		t.Fatalf("env file missing minimax fallback: %s", content)
+	}
+
+	jsonData, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read openclaw json: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(jsonData, &parsed); err != nil {
+		t.Fatalf("parse openclaw json: %v", err)
+	}
+	defaults := parsed["agents"].(map[string]interface{})["defaults"].(map[string]interface{})
+	if _, exists := defaults["imageModel"]; exists {
+		t.Fatalf("stale imageModel should be removed: %+v", defaults)
+	}
+	if _, exists := defaults["imageGenerationModel"]; exists {
+		t.Fatalf("stale imageGenerationModel should be removed: %+v", defaults)
+	}
+	if _, exists := defaults["videoGenerationModel"]; exists {
+		t.Fatalf("stale videoGenerationModel should be removed: %+v", defaults)
+	}
+}
+
+func TestCheckGatewayHealthIncludesBearerToken(t *testing.T) {
+	tmpDir := t.TempDir()
+	var authHeader string
+
+	cfg := &config.Config{
+		DeviceID:      "device-1",
+		DaemonVersion: "0.1.0",
+		Cloud: config.CloudConfig{
+			WSURL: "ws://43.156.161.7:18080/ws/device",
+		},
+		OpenClaw: config.OpenClawConfig{
+			WorkDir:               tmpDir,
+			EnvFile:               filepath.Join(tmpDir, ".env"),
+			JSONConfigFile:        filepath.Join(tmpDir, "openclaw.json"),
+			GatewayHealthURL:      "http://gateway-health.local/__openclaw__/canvas/",
+			GatewayTokenEnvKey:    "OPENCLAW_GATEWAY_TOKEN",
+			RestartTimeoutSec:     1,
+			HealthCheckTimeoutSec: 1,
+		},
+		Store: config.StoreConfig{
+			StateFile: filepath.Join(tmpDir, "state.json"),
+		},
+	}
+	if err := os.WriteFile(cfg.OpenClaw.EnvFile, []byte("OPENCLAW_GATEWAY_TOKEN='token-1'\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+
+	manager := NewConfigManager(cfg, store.NewFileStore(filepath.Join(tmpDir, "state.json")), stubExecutor{})
+	manager.httpClient = &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			authHeader = r.Header.Get("Authorization")
+			statusCode := http.StatusOK
+			if authHeader != "Bearer token-1" {
+				statusCode = http.StatusUnauthorized
+			}
+			return &http.Response{
+				StatusCode: statusCode,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	if err := manager.checkGatewayHealth(context.Background()); err != nil {
+		t.Fatalf("expected healthcheck success, got %v", err)
+	}
+	if authHeader != "Bearer token-1" {
+		t.Fatalf("unexpected auth header: %q", authHeader)
 	}
 }
