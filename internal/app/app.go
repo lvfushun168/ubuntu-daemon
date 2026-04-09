@@ -7,6 +7,7 @@ import (
 	"openclaw/dameon/internal/cloud"
 	"openclaw/dameon/internal/config"
 	"openclaw/dameon/internal/gateway"
+	"openclaw/dameon/internal/imagegen"
 	"openclaw/dameon/internal/manager"
 	"openclaw/dameon/internal/router"
 	"openclaw/dameon/internal/runner"
@@ -25,8 +26,9 @@ func New(cfg *config.Config, logger *log.Logger) (*App, error) {
 	remoteRunner := runner.NewRemoteCommandRunner(cfg.RemoteCommand, execRunner)
 	gatewayAdapter := gateway.NewAdapter(cfg, logger, stateStore)
 	videoService := video.NewService(cfg, logger, gatewayAdapter)
+	imageService := imagegen.NewService(cfg, logger, gatewayAdapter)
 
-	messageRouter := router.New(logger, nil, configManager, remoteRunner, gatewayAdapter, videoService, cfg.DaemonVersion)
+	messageRouter := router.New(logger, nil, configManager, remoteRunner, gatewayAdapter, videoService, imageService, cfg.DaemonVersion)
 	cloudClient := cloud.NewClient(cfg, logger, messageRouter)
 	messageRouter.SetSender(cloudClient)
 

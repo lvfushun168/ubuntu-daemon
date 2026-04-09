@@ -370,24 +370,15 @@ func TestAdapterChatSendsStructuredMessageWhenReferenceImageProvided(t *testing.
 			t.Fatalf("read chat request: %v", err)
 		}
 		chatParams := chatReq["params"].(map[string]interface{})
-		message, ok := chatParams["message"].(map[string]interface{})
+		message, ok := chatParams["message"].(string)
 		if !ok {
-			t.Fatalf("expected structured message payload, got %#v", chatParams["message"])
+			t.Fatalf("expected string message payload, got %#v", chatParams["message"])
 		}
-		if message["role"] != "user" {
-			t.Fatalf("unexpected message role: %#v", message)
+		if !strings.Contains(message, "请参考这张图生成类似风格的新图") {
+			t.Fatalf("unexpected string message: %s", message)
 		}
-		content, ok := message["content"].([]interface{})
-		if !ok || len(content) != 2 {
-			t.Fatalf("unexpected message content: %#v", message["content"])
-		}
-		textBlock := content[0].(map[string]interface{})
-		if textBlock["type"] != "text" || textBlock["text"] != "请参考这张图生成类似风格的新图" {
-			t.Fatalf("unexpected text block: %#v", textBlock)
-		}
-		imageBlock := content[1].(map[string]interface{})
-		if imageBlock["type"] != "image" || imageBlock["imageUrl"] != "https://example.com/reference.png" {
-			t.Fatalf("unexpected image block: %#v", imageBlock)
+		if !strings.Contains(message, "![reference-1](https://example.com/reference.png)") {
+			t.Fatalf("expected markdown reference image, got %s", message)
 		}
 
 		if err := conn.WriteJSON(map[string]interface{}{

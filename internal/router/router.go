@@ -25,6 +25,11 @@ type VideoService interface {
 	Generate(ctx context.Context, requestMsgID string, payload protocol.ChatMessagePayload) ([]protocol.ChatReplyPayload, error)
 }
 
+type ImageService interface {
+	CanHandle(payload protocol.ChatMessagePayload) bool
+	Generate(ctx context.Context, requestMsgID string, payload protocol.ChatMessagePayload) ([]protocol.ChatReplyPayload, error)
+}
+
 type MessageRouter struct {
 	logger         *log.Logger
 	sender         Sender
@@ -32,10 +37,11 @@ type MessageRouter struct {
 	remoteRunner   *runner.RemoteCommandRunner
 	gatewayAdapter ChatGateway
 	videoService   VideoService
+	imageService   ImageService
 	daemonVersion  string
 }
 
-func New(logger *log.Logger, sender Sender, configManager *manager.ConfigManager, remoteRunner *runner.RemoteCommandRunner, gatewayAdapter ChatGateway, videoService VideoService, daemonVersion string) *MessageRouter {
+func New(logger *log.Logger, sender Sender, configManager *manager.ConfigManager, remoteRunner *runner.RemoteCommandRunner, gatewayAdapter ChatGateway, videoService VideoService, imageService ImageService, daemonVersion string) *MessageRouter {
 	return &MessageRouter{
 		logger:         logger,
 		sender:         sender,
@@ -43,6 +49,7 @@ func New(logger *log.Logger, sender Sender, configManager *manager.ConfigManager
 		remoteRunner:   remoteRunner,
 		gatewayAdapter: gatewayAdapter,
 		videoService:   videoService,
+		imageService:   imageService,
 		daemonVersion:  daemonVersion,
 	}
 }
@@ -120,6 +127,33 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 		payload.Metadata = map[string]interface{}{}
 	}
 	payload.Metadata["cloud_msg_id"] = envelope.MsgID
+
+	if r.imageService != nil && r.imageService.CanHandle(payload) {
+		replies, err := r.imageService.Generate(ctx, envelope.MsgID, payload)
+		if err != nil {
+			r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
+				RequestMsgID: envelope.MsgID,
+				SessionID:    payload.SessionID,
+				Role:         "assistant",
+				ChunkSeq:     1,
+				IsFinal:      true,
+				IsEnd:        true,
+				FinishReason: "error",
+				ErrorCode:    "CHAT_EXECUTION_FAILED",
+				ErrorMessage: err.Error(),
+			})
+			return
+		}
+		for _, reply := range replies {
+			reply.RequestMsgID = envelope.MsgID
+			reply.SessionID = payload.SessionID
+			if reply.Role == "" {
+				reply.Role = "assistant"
+			}
+			r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, reply)
+		}
+		return
+	}
 
 	videoEnabled := r.videoService != nil && r.videoService.Enabled()
 	videoMatched := videoEnabled && r.videoService.IsVideoRequest(payload.Text)

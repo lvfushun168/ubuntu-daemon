@@ -456,14 +456,11 @@ func buildGatewayMessage(payload protocol.ChatMessagePayload) interface{} {
 	if len(payload.InputAttachments) == 0 {
 		return payload.Text
 	}
-
-	content := make([]map[string]interface{}, 0, 1+len(payload.InputAttachments))
+	var builder strings.Builder
 	if strings.TrimSpace(payload.Text) != "" {
-		content = append(content, map[string]interface{}{
-			"type": "text",
-			"text": payload.Text,
-		})
+		builder.WriteString(strings.TrimSpace(payload.Text))
 	}
+	refCount := 0
 	for _, attachment := range payload.InputAttachments {
 		if !strings.EqualFold(strings.TrimSpace(attachment.MediaType), "image") {
 			continue
@@ -471,20 +468,17 @@ func buildGatewayMessage(payload protocol.ChatMessagePayload) interface{} {
 		if strings.TrimSpace(attachment.PreviewURL) == "" {
 			continue
 		}
-		content = append(content, map[string]interface{}{
-			"type":     "image",
-			"imageUrl": attachment.PreviewURL,
-			"url":      attachment.PreviewURL,
-			"role":     firstNonEmptyStringValue(attachment.Role, "reference"),
-		})
+		refCount++
+		if builder.Len() > 0 {
+			builder.WriteString("\n\n")
+		}
+		builder.WriteString(fmt.Sprintf("参考图%d（请把这张图作为参考输入，而不是只描述它）：\n![reference-%d](%s)",
+			refCount, refCount, attachment.PreviewURL))
 	}
-	if len(content) == 0 {
+	if strings.TrimSpace(builder.String()) == "" {
 		return payload.Text
 	}
-	return map[string]interface{}{
-		"role":    firstNonEmptyStringValue(payload.Role, "user"),
-		"content": content,
-	}
+	return builder.String()
 }
 
 func (a *Adapter) collectChatReplies(ctx context.Context, conn *websocket.Conn, sessionID, runID, cloudMsgID string) ([]protocol.ChatReplyPayload, error) {
