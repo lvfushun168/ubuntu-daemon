@@ -401,7 +401,7 @@ func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload pr
 	params := map[string]interface{}{
 		"sessionKey":     payload.SessionID,
 		"idempotencyKey": cloudMsgID,
-		"message":        payload.Text,
+		"message":        buildGatewayMessage(payload),
 	}
 
 	if err := a.writeJSON(ctx, conn, gatewayRequest{
@@ -449,6 +449,41 @@ func (a *Adapter) sendChat(ctx context.Context, conn *websocket.Conn, payload pr
 			_ = json.Unmarshal(res.Payload, &ack)
 		}
 		return ack.RunID, nil
+	}
+}
+
+func buildGatewayMessage(payload protocol.ChatMessagePayload) interface{} {
+	if len(payload.InputAttachments) == 0 {
+		return payload.Text
+	}
+
+	content := make([]map[string]interface{}, 0, 1+len(payload.InputAttachments))
+	if strings.TrimSpace(payload.Text) != "" {
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": payload.Text,
+		})
+	}
+	for _, attachment := range payload.InputAttachments {
+		if !strings.EqualFold(strings.TrimSpace(attachment.MediaType), "image") {
+			continue
+		}
+		if strings.TrimSpace(attachment.PreviewURL) == "" {
+			continue
+		}
+		content = append(content, map[string]interface{}{
+			"type":     "image",
+			"imageUrl": attachment.PreviewURL,
+			"url":      attachment.PreviewURL,
+			"role":     firstNonEmptyStringValue(attachment.Role, "reference"),
+		})
+	}
+	if len(content) == 0 {
+		return payload.Text
+	}
+	return map[string]interface{}{
+		"role":    firstNonEmptyStringValue(payload.Role, "user"),
+		"content": content,
 	}
 }
 
@@ -1280,6 +1315,15 @@ func firstNonEmptyString(values map[string]interface{}, keys ...string) string {
 	for _, key := range keys {
 		if text := deepString(values[key]); strings.TrimSpace(text) != "" {
 			return text
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyStringValue(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
 		}
 	}
 	return ""

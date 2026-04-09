@@ -322,6 +322,130 @@ func TestAdapterChatIgnoresUnexpectedEventAfterConnect(t *testing.T) {
 	}
 }
 
+func TestAdapterChatSendsStructuredMessageWhenReferenceImageProvided(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade failed: %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "connect.challenge",
+			"payload": map[string]interface{}{
+				"nonce": "nonce-structured",
+			},
+		}); err != nil {
+			t.Fatalf("write challenge: %v", err)
+		}
+
+		var connectReq map[string]interface{}
+		if err := conn.ReadJSON(&connectReq); err != nil {
+			t.Fatalf("read connect request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   connectReq["id"],
+			"ok":   true,
+		}); err != nil {
+			t.Fatalf("write connect response: %v", err)
+		}
+
+		var subscribeReq map[string]interface{}
+		if err := conn.ReadJSON(&subscribeReq); err != nil {
+			t.Fatalf("read subscribe request: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   subscribeReq["id"],
+			"ok":   true,
+		}); err != nil {
+			t.Fatalf("write subscribe response: %v", err)
+		}
+
+		var chatReq map[string]interface{}
+		if err := conn.ReadJSON(&chatReq); err != nil {
+			t.Fatalf("read chat request: %v", err)
+		}
+		chatParams := chatReq["params"].(map[string]interface{})
+		message, ok := chatParams["message"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected structured message payload, got %#v", chatParams["message"])
+		}
+		if message["role"] != "user" {
+			t.Fatalf("unexpected message role: %#v", message)
+		}
+		content, ok := message["content"].([]interface{})
+		if !ok || len(content) != 2 {
+			t.Fatalf("unexpected message content: %#v", message["content"])
+		}
+		textBlock := content[0].(map[string]interface{})
+		if textBlock["type"] != "text" || textBlock["text"] != "请参考这张图生成类似风格的新图" {
+			t.Fatalf("unexpected text block: %#v", textBlock)
+		}
+		imageBlock := content[1].(map[string]interface{})
+		if imageBlock["type"] != "image" || imageBlock["imageUrl"] != "https://example.com/reference.png" {
+			t.Fatalf("unexpected image block: %#v", imageBlock)
+		}
+
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type": "res",
+			"id":   chatReq["id"],
+			"ok":   true,
+			"payload": map[string]interface{}{
+				"runId": "run-structured",
+			},
+		}); err != nil {
+			t.Fatalf("write chat response: %v", err)
+		}
+		if err := conn.WriteJSON(map[string]interface{}{
+			"type":  "event",
+			"event": "chat",
+			"payload": map[string]interface{}{
+				"runId":      "run-structured",
+				"sessionKey": "session-structured",
+				"delta":      "done",
+				"status":     "done",
+			},
+		}); err != nil {
+			t.Fatalf("write chat event: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	adapter := newTestAdapter(t, wsURL, "token-structured")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	replies, err := adapter.Chat(ctx, protocol.ChatMessagePayload{
+		SessionID: "session-structured",
+		Role:      "user",
+		Text:      "请参考这张图生成类似风格的新图",
+		Stream:    true,
+		InputAttachments: []protocol.ChatInputAttachment{
+			{
+				MediaID:    "m_ref",
+				MediaType:  "image",
+				PreviewURL: "https://example.com/reference.png",
+				Role:       "reference",
+			},
+		},
+		Metadata: map[string]interface{}{
+			"cloud_msg_id": "msg-structured",
+		},
+	})
+	if err != nil {
+		t.Fatalf("chat failed: %v", err)
+	}
+	if len(replies) != 1 || replies[0].Text != "done" {
+		t.Fatalf("unexpected replies: %+v", replies)
+	}
+}
+
 func TestAdapterChatHandlesOpenClawFinalStateSchema(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

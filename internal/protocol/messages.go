@@ -54,12 +54,13 @@ type SysConfigAckPayload struct {
 }
 
 type ChatMessagePayload struct {
-	SessionID string                 `json:"session_id"`
-	UserID    string                 `json:"user_id,omitempty"`
-	Role      string                 `json:"role"`
-	Text      string                 `json:"text"`
-	Stream    bool                   `json:"stream"`
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	SessionID        string                 `json:"session_id"`
+	UserID           string                 `json:"user_id,omitempty"`
+	Role             string                 `json:"role"`
+	Text             string                 `json:"text"`
+	Stream           bool                   `json:"stream"`
+	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+	InputAttachments []ChatInputAttachment  `json:"input_attachments,omitempty"`
 }
 
 type ChatReplyPayload struct {
@@ -75,6 +76,13 @@ type ChatReplyPayload struct {
 	ErrorCode    string           `json:"error_code,omitempty"`
 	ErrorMessage string           `json:"error_message,omitempty"`
 	Attachments  []ChatAttachment `json:"attachments,omitempty"`
+}
+
+type ChatInputAttachment struct {
+	MediaID    string `json:"media_id,omitempty"`
+	MediaType  string `json:"media_type,omitempty"`
+	PreviewURL string `json:"preview_url,omitempty"`
+	Role       string `json:"role,omitempty"`
 }
 
 type ChatAttachment struct {
