@@ -9,6 +9,7 @@ import (
 type GenerationRequest struct {
 	Model           string `json:"model"`
 	Prompt          string `json:"prompt"`
+	FirstFrameImage string `json:"first_frame_image,omitempty"`
 	Duration        int    `json:"duration"`
 	Resolution      string `json:"resolution"`
 	PromptOptimizer bool   `json:"prompt_optimizer"`

@@ -128,8 +128,23 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 	}
 	payload.Metadata["cloud_msg_id"] = envelope.MsgID
 
-	if r.imageService != nil && r.imageService.CanHandle(payload) {
-		replies, err := r.imageService.Generate(ctx, envelope.MsgID, payload)
+	videoEnabled := r.videoService != nil && r.videoService.Enabled()
+	videoMatched := videoEnabled && r.videoService.IsVideoRequest(payload.Text)
+	r.logger.Printf("chat route decision msg_id=%s session_id=%s video_enabled=%t video_matched=%t input_attachments=%d text=%q",
+		envelope.MsgID, payload.SessionID, videoEnabled, videoMatched, len(payload.InputAttachments), payload.Text)
+
+	if videoMatched {
+		r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
+			RequestMsgID: envelope.MsgID,
+			SessionID:    payload.SessionID,
+			Role:         "assistant",
+			Text:         "正在生成视频，预计需要几十秒，请稍候",
+			ChunkSeq:     1,
+			IsFinal:      false,
+			IsEnd:        false,
+		})
+
+		replies, err := r.videoService.Generate(ctx, envelope.MsgID, payload)
 		if err != nil {
 			r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
 				RequestMsgID: envelope.MsgID,
@@ -155,23 +170,8 @@ func (r *MessageRouter) handleChat(ctx context.Context, envelope protocol.Envelo
 		return
 	}
 
-	videoEnabled := r.videoService != nil && r.videoService.Enabled()
-	videoMatched := videoEnabled && r.videoService.IsVideoRequest(payload.Text)
-	r.logger.Printf("chat route decision msg_id=%s session_id=%s video_enabled=%t video_matched=%t text=%q",
-		envelope.MsgID, payload.SessionID, videoEnabled, videoMatched, payload.Text)
-
-	if videoMatched {
-		r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
-			RequestMsgID: envelope.MsgID,
-			SessionID:    payload.SessionID,
-			Role:         "assistant",
-			Text:         "正在生成视频，预计需要几十秒，请稍候",
-			ChunkSeq:     1,
-			IsFinal:      false,
-			IsEnd:        false,
-		})
-
-		replies, err := r.videoService.Generate(ctx, envelope.MsgID, payload)
+	if r.imageService != nil && r.imageService.CanHandle(payload) {
+		replies, err := r.imageService.Generate(ctx, envelope.MsgID, payload)
 		if err != nil {
 			r.reply(ctx, envelope.MsgID, protocol.TypeChatReply, protocol.ChatReplyPayload{
 				RequestMsgID: envelope.MsgID,

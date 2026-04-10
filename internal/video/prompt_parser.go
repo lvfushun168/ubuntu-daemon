@@ -5,6 +5,7 @@ import "strings"
 var videoKeywords = []string{
 	"生成视频",
 	"做个视频",
+	"图生视频",
 	"短视频",
 	"文生视频",
 	"video",

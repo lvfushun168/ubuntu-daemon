@@ -104,11 +104,13 @@ func (s *Service) generate(ctx context.Context, requestMsgID string, payload pro
 	if prompt == "" {
 		return s.errorReplies(payload.SessionID, "VIDEO_REQUEST_UNSUPPORTED", "video prompt is empty"), nil
 	}
+	firstFrameImage := firstReferenceImage(payload.InputAttachments)
 
 	createCtx, cancelCreate := context.WithTimeout(ctx, time.Duration(videoCfg.CreateTimeoutSec)*time.Second)
 	taskID, err := client.CreateTextToVideo(createCtx, GenerationRequest{
 		Model:           model,
 		Prompt:          prompt,
+		FirstFrameImage: firstFrameImage,
 		Duration:        duration,
 		Resolution:      resolution,
 		PromptOptimizer: promptOptimizer,
@@ -196,6 +198,15 @@ func (s *Service) generate(ctx context.Context, requestMsgID string, payload pro
 	}
 	s.logger.Printf("video generate success request_msg_id=%s media_id=%s preview_url=%s", requestMsgID, uploaded.MediaID, uploaded.PreviewURL)
 	return []protocol.ChatReplyPayload{final}, nil
+}
+
+func firstReferenceImage(items []protocol.ChatInputAttachment) string {
+	for _, item := range items {
+		if strings.EqualFold(strings.TrimSpace(item.MediaType), "image") && strings.TrimSpace(item.PreviewURL) != "" {
+			return strings.TrimSpace(item.PreviewURL)
+		}
+	}
+	return ""
 }
 
 func (s *Service) pollTask(ctx context.Context, client VideoClient, taskID string, videoCfg config.VideoConfig) (TaskStatus, error) {
